@@ -26,3 +26,4 @@ nohup.out
 
 # HF cache (로컬 개발 시)
 hf-cache/
+*.tmp.*
