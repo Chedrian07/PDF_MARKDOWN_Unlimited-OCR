@@ -25,7 +25,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     store = JobStore(settings.jobs_dir)
     store.load_existing()
     broker = EventBroker()
-    engine = build_engine(settings)  # metal 등 미지원 디바이스는 여기서 즉시 실패
+    engine = build_engine(settings)  # 잘못된 OCR_DEVICE/OCR_ENGINE은 여기서 즉시 실패
     cancel_events: dict[str, threading.Event] = {}
     worker = Worker(store, broker, engine, settings, cancel_events)
     load_state: dict = {"error": None}

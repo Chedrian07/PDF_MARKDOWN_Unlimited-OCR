@@ -50,6 +50,10 @@ def load_image(image_path):
 
 def _autocast_ctx(device, dtype):
     """[vendor patch P1] device-aware replacement for hardcoded torch.autocast("cuda", bf16)."""
+    if device.type == "mps":
+        # [vendor patch P12] torch 2.10 MPS의 autocast(bf16)가 로짓을 오염시켜 생성이
+        # 반복 루프로 퇴화 — 가중치 dtype 그대로 연산한다 (bf16 로딩이면 성능 손실 없음)
+        return contextlib.nullcontext()
     if dtype in (torch.float16, torch.bfloat16):
         return torch.autocast(device.type, dtype=dtype)
     return contextlib.nullcontext()
@@ -593,7 +597,11 @@ class UnlimitedOCRModel(DeepseekV2Model):
                     images_in_this_batch = torch.cat(images_in_this_batch, dim=0)
                     # exit()
 
-                    inputs_embeds[idx].masked_scatter_(images_seq_mask[idx].unsqueeze(-1).to(inputs_embeds.device), images_in_this_batch)
+                    # [vendor patch P11] 브로드캐스트 마스크 masked_scatter_가 MPS(torch 2.10)에서
+                    # 조용히 오동작(이미지 임베딩 미주입 → 빈 출력) — bool 인덱싱 대입으로 교체.
+                    # CPU/CUDA에서는 기존 masked_scatter_와 결과 동일.
+                    _img_mask = images_seq_mask[idx].to(inputs_embeds.device)
+                    inputs_embeds[idx][_img_mask] = images_in_this_batch.to(inputs_embeds.dtype)
 
                 idx += 1
             

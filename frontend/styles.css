@@ -184,6 +184,8 @@ a { color: var(--accent); }
 .badge-device.is-cuda .badge-dot { background: var(--ok); }
 .badge-device.is-cpu { color: var(--text-muted); }
 .badge-device.is-cpu .badge-dot { background: var(--info); }
+.badge-device.is-metal { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); background: var(--accent-weak); }
+.badge-device.is-metal .badge-dot { background: var(--accent); }
 .badge-warn { color: var(--warn); background: var(--warn-weak); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
 .badge-loading { color: var(--info); background: var(--info-weak); border-color: color-mix(in srgb, var(--info) 35%, var(--border)); }
 .badge-error { color: var(--danger); background: var(--danger-weak); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }

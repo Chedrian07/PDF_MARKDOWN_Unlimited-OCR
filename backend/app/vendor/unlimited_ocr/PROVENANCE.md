@@ -25,5 +25,7 @@ CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
 | P8 | `eval()` 기반 geo 플로팅 분기 비활성화 (`if False and ...`) | **보안**: 모델 출력(=문서 내용에 의해 조작 가능)을 `eval()`에 전달 — PDF 내용을 통한 코드 실행 벡터. 본 앱은 geo 모드 미사용 |
 | P9 | det 좌표 파싱 `eval()` → `ast.literal_eval()` | **보안**: 동일 벡터. 리터럴 좌표만 허용, 이상 입력은 기존 try/except로 스킵 |
 | P10 | `UnlimitedOCRForCausalLM`에 `GenerationMixin` 명시 상속 추가 | transformers 4.50+는 커스텀 모델에 `generate()`를 자동 제공하지 않음. 업스트림은 trust_remote_code 로딩 시 transformers의 하위호환 심이 자동 부착하지만, 벤더링 직접 로드는 심이 없어 명시 상속 필요 |
+| P11 | 이미지 임베딩 주입의 `masked_scatter_`(브로드캐스트 (L,1) 마스크) → bool 인덱싱 대입 (`inputs_embeds[idx][mask] = …`) | **MPS 정합성**: torch 2.10.0 MPS에서 브로드캐스트 마스크 `masked_scatter_`가 조용히 오동작(뷰/expand 무관, 소스 첫 원소만 기록)해 이미지 임베딩이 주입되지 않음 → 모델이 즉시 EOS 출력. CPU/CUDA는 결과 동일 (P2의 마스크 디바이스 수정 의도 포함) |
+| P12 | `_autocast_ctx`가 `mps`에서는 항상 nullcontext 반환 | **MPS 정합성**: torch 2.10.0의 `torch.autocast("mps", bf16)`가 로짓을 오염시켜 생성이 반복 루프(`"), ), "` 무한 반복)로 퇴화. 가중치를 bf16으로 로딩하므로 autocast 없이도 bf16 연산 — 성능 손실 없음. CPU/CUDA 경로 불변 |
 
 업스트림 갱신 시: 새 revision을 받아 이 패치들을 재적용하고 이 문서를 갱신할 것.

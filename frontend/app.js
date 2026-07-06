@@ -515,7 +515,9 @@ function setupTheme() {
 /* ============================ Health ============================ */
 
 function shortenGpu(name) {
-  return String(name || '').replace(/^NVIDIA\s+GeForce\s+/i, '').replace(/^NVIDIA\s+/i, '').trim();
+  return String(name || '')
+    .replace(/^NVIDIA\s+GeForce\s+/i, '').replace(/^NVIDIA\s+/i, '')
+    .replace(/^Apple\s+/i, '').trim();
 }
 
 async function loadHealth() {
@@ -545,16 +547,18 @@ function renderHealth(d) {
   ));
 
   const isCuda = d.device === 'cuda';
-  const devName = isCuda ? 'CUDA' : (d.device === 'cpu' ? 'CPU' : String(d.device || '?').toUpperCase());
+  const isMetal = d.device === 'metal';
+  const devName = isCuda ? 'CUDA' : (isMetal ? 'Metal' : (d.device === 'cpu' ? 'CPU' : String(d.device || '?').toUpperCase()));
   let devText = devName;
-  if (isCuda && d.gpu_name) {
+  if ((isCuda || isMetal) && d.gpu_name) {
     const short = shortenGpu(d.gpu_name);
     if (short) devText = `${devName} · ${short}`;
   }
   const devTitle = `디바이스: ${devName}` +
     (d.gpu_name ? ` (${d.gpu_name})` : '') +
     ` · dtype: ${d.dtype || '-'} · 네이티브 연산: ${d.native_ops ? 'on' : 'off'}`;
-  c.appendChild(h('span', { class: `badge badge-device ${isCuda ? 'is-cuda' : 'is-cpu'}`, title: devTitle },
+  const devClass = isCuda ? 'is-cuda' : (isMetal ? 'is-metal' : 'is-cpu');
+  c.appendChild(h('span', { class: `badge badge-device ${devClass}`, title: devTitle },
     h('span', { class: 'badge-dot' }),
     h('span', { text: devText }),
   ));

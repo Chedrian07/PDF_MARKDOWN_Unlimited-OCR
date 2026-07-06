@@ -24,15 +24,24 @@ dependencies = [
 ]
 
 # torch는 디바이스 백엔드별 인덱스가 달라 extra로 분리 (docker build ARG로 선택)
+# metal: macOS arm64 전용 — PyPI 기본 휠에 MPS 지원이 내장되어 있어 별도 인덱스 불필요
 [project.optional-dependencies]
 cpu = ["torch==2.10.0", "torchvision==0.25.0"]
 cu129 = ["torch==2.10.0", "torchvision==0.25.0"]
+metal = [
+    "torch==2.10.0; sys_platform == 'darwin'",
+    "torchvision==0.25.0; sys_platform == 'darwin'",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "httpx>=0.27"]
 
 [tool.uv]
-conflicts = [[{ extra = "cpu" }, { extra = "cu129" }]]
+conflicts = [
+    [{ extra = "cpu" }, { extra = "cu129" }],
+    [{ extra = "cpu" }, { extra = "metal" }],
+    [{ extra = "cu129" }, { extra = "metal" }],
+]
 package = false
 
 [tool.uv.sources]

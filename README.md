@@ -10,8 +10,8 @@
   박스 오버레이(그라운딩 좌표) ② RAW OUTPUT 토큰 스트림 ③ 실시간 렌더 미리보기가
   동시에 흐르고, STOP 버튼으로 중단해도 부분 결과가 보존됨
   (공식 데모 GIF의 long-horizon 파싱 경험 재현)
-- **디바이스 백엔드**: CPU / CUDA 지원, Metal은 로드맵 (아래 참조)
-- **원커맨드 배포**: `docker compose up` 하나로 끝
+- **디바이스 백엔드**: CPU / CUDA / Metal(Apple Silicon, torch MPS) 지원
+- **원커맨드 배포**: `docker compose up` 하나로 끝 (Metal은 로컬 실행 — 아래 참조)
 
 ## 빠른 시작 (Docker)
 
@@ -35,6 +35,22 @@ docker compose --profile cuda up -d --build ocr-cuda
 OCR_ENGINE=fake docker compose up -d --build
 ```
 
+## macOS에서 Metal(MPS)로 실행
+
+Docker(맥의 Linux VM)에서는 GPU 패스스루가 없어 Metal을 쓸 수 없습니다.
+Apple Silicon Mac에서는 로컬(uv)로 실행하세요:
+
+```bash
+cd backend
+uv sync --extra metal        # macOS arm64 torch 휠 (MPS 내장)
+uv pip install ../native     # 선택 — C++ 가속
+OCR_DEVICE=metal uv run uvicorn app.main:app   # http://localhost:8000
+```
+
+- dtype은 `auto`면 bfloat16(macOS 14+), 미지원 조합이면 float32로 자동 폴백
+- 첫 청크는 Metal 셰이더 컴파일 때문에 이후 청크보다 느릴 수 있습니다
+- 청크가 끝날 때마다 `torch.mps.empty_cache()`로 유니파이드 메모리를 반환합니다
+
 ## E2E 스모크 테스트
 
 ```bash
@@ -48,7 +64,7 @@ cd backend && uv run python ../scripts/make_sample_pdf.py ../sample/sample.pdf &
 ```bash
 # 백엔드 (Python 3.12, torch CPU)
 cd backend
-uv sync --extra cpu          # CUDA 개발: --extra cu129
+uv sync --extra cpu          # CUDA: --extra cu129 · macOS Metal: --extra metal
 uv pip install ../native     # C++ 가속 모듈 (선택 — 없어도 동작)
 uv run pytest                # 유닛/통합 테스트 (FakeEngine, 모델 불필요)
 uv run uvicorn app.main:app --reload   # http://localhost:8000
@@ -60,7 +76,7 @@ cd native && uv venv --python 3.12 .venv \
 ```
 
 환경변수 전체 목록: [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md) —
-`OCR_DEVICE`(cpu/cuda), `OCR_DTYPE`, `OCR_ENGINE`(unlimited/fake),
+`OCR_DEVICE`(cpu/cuda/metal), `OCR_DTYPE`, `OCR_ENGINE`(unlimited/fake),
 `PAGES_PER_CHUNK`, `RENDER_DPI`, `MAX_UPLOAD_MB` 등.
 
 ## 동작 방식
@@ -86,7 +102,7 @@ PDF 업로드 → pymupdf로 페이지 PNG 렌더(기본 200dpi)
 |---|---|---|
 | CPU | ✅ | 기본 float32 (`OCR_DTYPE=bfloat16` 가능) |
 | CUDA | ✅ | bf16, torch 2.10 cu129 (sm_89·sm_120 확인) |
-| Metal | 🗺️ 로드맵 | torch MPS로 `engine/registry.py`에 추가 예정 — 구조상 registry 등록 + dtype 분기만 필요 |
+| Metal | ✅ | torch MPS, `OCR_DEVICE=metal`(별칭 `mps`) — bf16, Apple Silicon 로컬 실행 전용 (Docker 불가) |
 
 ## 문서
 

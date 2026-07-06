@@ -9,8 +9,9 @@
 (3.3B MoE VLM, DeepSeek-OCR 계열, MIT)로 파싱하여 **이미지(figure)까지 포함된 Markdown**으로
 변환해 주는 셀프호스팅 애플리케이션.
 
-- 디바이스 백엔드: **CPU**, **CUDA** (구현 완료) / **Metal** (로드맵, 스텁만 존재)
-- 배포: `docker compose up` 한 번으로 실행 (CPU 기본, `--profile cuda`로 GPU)
+- 디바이스 백엔드: **CPU**, **CUDA**, **Metal**(torch MPS, Apple Silicon) — 모두 구현 완료
+- 배포: `docker compose up` 한 번으로 실행 (CPU 기본, `--profile cuda`로 GPU).
+  Metal은 컨테이너 GPU 패스스루가 없어 **로컬(uv) 실행 전용**
 - 개발 스택: Python 3.12 (uv 관리) + C++17 (pybind11 네이티브 모듈)
 
 ## 2. 모델 사용 방식 (리서치 결과 요약)
@@ -36,6 +37,9 @@
 3. `masked_scatter_`의 마스크 디바이스 수정 (modeling_unlimitedocr.py:582)
 4. 이미지 텐서 `.to(torch.bfloat16)` 하드코딩 → 모델 dtype 추종
 5. `infer`/`infer_multi`에 `streamer=None`, `stopping_criteria=None` 파라미터 추가 (SSE 스트리밍/취소용, 기본값이면 업스트림과 동일 동작)
+6. 이미지 임베딩 주입을 `masked_scatter_` → bool 인덱싱 대입으로 교체 (torch 2.10 MPS의
+   브로드캐스트 마스크 버그 회피 — CPU/CUDA 결과 동일, PROVENANCE P11)
+7. `_autocast_ctx`는 `mps`에서 항상 no-op — MPS autocast(bf16)의 로짓 오염 회피 (PROVENANCE P12)
 
 ## 3. 디렉터리 구조
 
@@ -54,7 +58,7 @@
 │   │   ├── jobs.py             # JobStore + 단일 워커 큐
 │   │   ├── engine/
 │   │   │   ├── base.py         # OCREngine 프로토콜, StreamCallback
-│   │   │   ├── registry.py     # cpu/cuda 선택, metal → NotImplementedError
+│   │   │   ├── registry.py     # cpu/cuda/metal 디바이스·엔진 선택
 │   │   │   ├── unlimited.py    # 실모델 엔진 (벤더링 코드 사용)
 │   │   │   └── fake.py         # 테스트/데모용 가짜 엔진 (torch 불필요)
 │   │   ├── pipeline/
@@ -219,16 +223,36 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 |---|---|---|---|
 | CPU | ✅ 구현 | `OCR_DEVICE=cpu` | 기본 dtype float32 (`OCR_DTYPE`로 변경 가능) |
 | CUDA | ✅ 구현 | `OCR_DEVICE=cuda` | bf16, cu129 휠, sm_89/sm_120 확인 |
-| Metal | 🗺️ 로드맵 | `OCR_DEVICE=metal` | 현재 `NotImplementedError` — torch MPS 지원 시 registry에 추가 예정 |
+| Metal | ✅ 구현 | `OCR_DEVICE=metal` (별칭 `mps`) | torch MPS. Apple Silicon 로컬 실행 전용 — Docker 불가. `uv sync --extra metal` |
 
-`app/engine/registry.py`가 단일 진입점: 환경 검증(cuda 가용성 등) 후 엔진 생성.
+`app/engine/registry.py`가 단일 진입점: 디바이스/엔진 이름 검증 후 엔진 생성.
+CUDA/MPS 가용성 검증은 `UnlimitedEngine.load()` 시점(= 프리로드 스레드/첫 잡)에 수행되어
+실패 사유가 `/api/health`의 `model_load_error`로 노출된다.
+
+### Metal(MPS) 구현 노트
+
+- 사용자 노출 디바이스명은 `metal`, torch 디바이스는 `mps`
+  (`engine/unlimited.py`의 `torch_device_name()`이 매핑, health에는 `metal`로 표기)
+- dtype `auto`: bf16 텐서 할당 프로브 성공 시 bfloat16(macOS 14+), 실패 시 float32 폴백.
+  `OCR_DTYPE=float16`도 선택 가능(구형 macOS에서 속도용 — bf16 권장)
+- 벤더 코드는 P1/P4 패치(`_autocast_ctx`, 파라미터 디바이스 추종)로 디바이스 중립.
+  단, torch 2.10.0 MPS의 조용한 버그 2건을 회피하는 패치가 추가로 필요했다 (PROVENANCE.md):
+  - **P11**: 브로드캐스트 마스크 `masked_scatter_` 오동작 → 이미지 임베딩 미주입 → 빈 출력
+  - **P12**: `torch.autocast("mps", bf16)`가 로짓 오염 → 반복 루프. MPS에서는 autocast 미사용
+    (가중치가 bf16이라 성능 동일)
+- `PYTORCH_ENABLE_MPS_FALLBACK=1`을 엔진 생성 시 `setdefault` — 미구현 op는 CPU 폴백 (안전망)
+- 청크(infer 호출) 종료마다 `torch.mps.empty_cache()` — 유니파이드 메모리 반환으로
+  장문서 잡의 시스템 메모리 압박 완화
+- 첫 청크는 Metal 셰이더 컴파일로 이후보다 느림 (정상)
+- 메모리 상한 조정이 필요하면 `PYTORCH_MPS_HIGH_WATERMARK_RATIO` (torch 문서 참조 — 기본값 권장)
+- `gpu_name`은 `sysctl machdep.cpu.brand_string` (예: "Apple M4 Max")
 
 ## 7. 환경변수
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `OCR_DEVICE` | `cpu` | `cpu`\|`cuda`\|`metal`(스텁) |
-| `OCR_DTYPE` | `auto` | `auto`(cuda→bfloat16, cpu→float32)\|`bfloat16`\|`float32` |
+| `OCR_DEVICE` | `cpu` | `cpu`\|`cuda`\|`metal` (`mps`는 `metal`의 별칭) |
+| `OCR_DTYPE` | `auto` | `auto`(cuda→bf16, metal→bf16 또는 fp32 폴백, cpu→fp32)\|`bfloat16`\|`float16`\|`float32` |
 | `OCR_ENGINE` | `unlimited` | `unlimited`\|`fake`(모델 없이 파이프라인 데모/테스트) |
 | `MODEL_ID` | `baidu/Unlimited-OCR` | HF 모델 ID |
 | `MODEL_REVISION` | `ee63731b…` | HF revision 고정 (README의 검증 커밋) |
@@ -320,6 +344,6 @@ def banned_ngram_tokens_ref(sequence: list[int], ngram_size: int, window: int) -
 
 ## 12. 로드맵
 
-1. **Metal 백엔드**: torch `mps` 디바이스 + 벤더 코드의 autocast 분기 확장 (registry에 등록만 하면 되는 구조)
+1. ~~Metal 백엔드~~ — 완료 (§6 참조)
 2. vLLM/SGLang 서빙 엔진 옵션 (모델 repo가 공식 지원 — 대량 처리용)
 3. 동시 워커 (GPU 멀티 인스턴스 / 페이지 병렬)

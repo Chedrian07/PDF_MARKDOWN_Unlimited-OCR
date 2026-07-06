@@ -6,6 +6,7 @@
 #
 # 기본 프로필은 .env의 COMPOSE_PROFILES=cpu 로 지정된다.
 # 모델 가중치(~6.7GB)는 최초 실행 시 hf-cache 볼륨에 1회 다운로드된다.
+# Metal(Apple Silicon)은 컨테이너에서 GPU를 쓸 수 없어 로컬 uv로 실행한다 — README §macOS 참조.
 
 services:
   ocr-cpu:

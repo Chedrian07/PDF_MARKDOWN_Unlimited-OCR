@@ -23,8 +23,8 @@ def _env_int(name: str, default: int) -> int:
 
 @dataclass
 class Settings:
-    device: str = "cpu"                 # cpu | cuda | metal(로드맵)
-    dtype: str = "auto"                 # auto | bfloat16 | float32
+    device: str = "cpu"                 # cpu | cuda | metal (mps는 metal의 별칭)
+    dtype: str = "auto"                 # auto | bfloat16 | float16 | float32
     engine: str = "unlimited"           # unlimited | fake
     model_id: str = "baidu/Unlimited-OCR"
     model_revision: str = _DEFAULT_REVISION
@@ -43,8 +43,9 @@ class Settings:
     def from_env(cls) -> "Settings":
         sep = os.environ.get("PAGE_SEPARATOR")
         frontend = os.environ.get("FRONTEND_DIR")
+        device = os.environ.get("OCR_DEVICE", "cpu").strip().lower()
         return cls(
-            device=os.environ.get("OCR_DEVICE", "cpu").strip().lower(),
+            device="metal" if device == "mps" else device,
             dtype=os.environ.get("OCR_DTYPE", "auto").strip().lower(),
             engine=os.environ.get("OCR_ENGINE", "unlimited").strip().lower(),
             model_id=os.environ.get("MODEL_ID", "baidu/Unlimited-OCR"),
