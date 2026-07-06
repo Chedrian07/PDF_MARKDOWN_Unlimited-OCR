@@ -176,6 +176,15 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
     `ocr`=파싱 중 페이지(청크 시작 시 점프, `<PAGE>` 마커마다 증가), `merge`=총 페이지.
     **레이아웃 박스의 페이지 추적은 반드시 `phase==="ocr"`인 이벤트만 사용할 것**
   - `event: token`    `data: {"text":"델타 텍스트"}`   ← 모델 생성 토큰 실시간 (GIF 스타일)
+
+    **토큰 스트림 문법 (실캡처로 확정, frontend/tests/fixtures/*.sse.txt):**
+    각 청크의 스트림은 `<PAGE>` 마커로 **시작**한다 — 마커는 "지금 시작하는 페이지의 선언"이다.
+    `청크k 스트림 = <PAGE> + page(start_k) 내용 + <PAGE> + page(start_k+1) 내용 + …`
+    청크 시작 직전에 `progress(phase=ocr, current_page=start_k, chunk=k)`가 먼저 발행되므로,
+    **각 청크의 첫 마커는 이미 선언된 페이지의 재확인(no-op)** 이고 이후 마커만 +1이다.
+    블록 문법: `<|det|>label [x1,y1,x2,y2]<|/det|>텍스트…` (label: title/text/table/equation/
+    image/page_number 등, 좌표 0–999 정규화) 또는 `<|ref|>label<|/ref|><|det|>[[…]]<|/det|>`.
+    표는 블록 텍스트 안에 HTML `<table>`로 온다.
   - `event: done`     `data: {"markdown_url":"...","archive_url":"..."}`
   - `event: error`    `data: {"message":"..."}`  (취소 시 `"canceled": true` 포함)
 

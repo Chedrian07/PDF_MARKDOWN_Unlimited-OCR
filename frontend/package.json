@@ -1,0 +1,9 @@
+{
+  "name": "unlimited-ocr-frontend",
+  "private": true,
+  "type": "module",
+  "description": "Unlimited-OCR 정적 프론트엔드 — 빌드 스텝/외부 의존성 없음. 이 파일은 Node 테스트 러너가 app.js를 ES 모듈로 임포트하기 위해서만 존재한다 (브라우저/서버 동작에는 영향 없음).",
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}

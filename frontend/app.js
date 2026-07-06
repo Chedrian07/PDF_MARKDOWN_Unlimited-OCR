@@ -4,11 +4,252 @@
 // Active-job live view = synchronized 3 panes fed by one SSE token stream:
 //   left   : source page image + layout boxes parsed from grounding tokens
 //   middle : raw token stream (with <PAGE> dividers)
-//   right  : cleaned markdown rendered server-side via POST /render-preview
+//   right  : det-block structured markdown rendered via POST /render-preview
+//
+// 스트림 문법 (실캡처 확정, docs/ARCHITECTURE.md §5 / frontend/tests/fixtures):
+//   각 페이지는 progress(phase=ocr, current_page=p)로 먼저 "선언"된 뒤
+//   토큰 스트림의 <PAGE> 마커로 시작한다. 선언 직후의 첫 마커는 재확인(no-op)이고,
+//   선언 없이 만나는 마커만 +1 이다. 블록 문법: <|det|>label [x1,y1,x2,y2]<|/det|>텍스트…
+//
+// 테스트: node --test frontend/tests/   (또는 frontend/ 에서: npm test)
+//   픽스처 리플레이 테스트가 아래 "Pure live-stream core" 익스포트를 직접 임포트한다.
 
 'use strict';
 
-/* ============================ Constants ============================ */
+/* ============================================================================
+ * Pure live-stream core — exported for frontend/tests/, no DOM access.
+ * ========================================================================== */
+
+export const PAGE_MARKER = '<PAGE>';
+// literals whose partial prefix at a chunk boundary must be held back
+const MARKER_LITERALS = ['<PAGE>', '<|ref|>', '<|/ref|>', '<|det|>', '<|/det|>'];
+const IMAGE_BLOCK = '> 🖼 그림 감지됨';
+// noise labels dropped from the reading-view preview
+const DROP_LABELS = new Set(['page_number', 'header', 'footer', 'footnote']);
+
+export function normalizeLabel(label) {
+  return String(label || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
+export function scanQuads(payload) {
+  const nums = String(payload).match(/\d+/g);
+  if (!nums) return [];
+  const quads = [];
+  for (let i = 0; i + 3 < nums.length; i += 4) {
+    quads.push([Number(nums[i]), Number(nums[i + 1]), Number(nums[i + 2]), Number(nums[i + 3])]);
+  }
+  return quads;
+}
+
+const clampCoord = (v) => Math.max(0, Math.min(999, Number(v) || 0));
+
+// Index from which `s` may contain an incomplete grounding structure / marker.
+// Returns s.length when the whole string is safe to consume. `cap` guards
+// against holding back forever on a malformed block that never closes.
+export function incompleteTailIndex(s, cap) {
+  const n = s.length;
+  let cut = n;
+
+  // an opened ref block that has not seen its closing <|/det|> yet
+  const lastRef = s.lastIndexOf('<|ref|>');
+  if (lastRef !== -1 && s.indexOf('<|/det|>', lastRef) === -1) cut = Math.min(cut, lastRef);
+
+  // an opened det that has not closed yet
+  const lastDet = s.lastIndexOf('<|det|>');
+  if (lastDet !== -1 && s.indexOf('<|/det|>', lastDet + 7) === -1) cut = Math.min(cut, lastDet);
+
+  // an unterminated special token: "<|" with no "|>" after it
+  const lastPipe = s.lastIndexOf('<|');
+  if (lastPipe !== -1 && s.indexOf('|>', lastPipe + 2) === -1) cut = Math.min(cut, lastPipe);
+
+  // a partial literal prefix at the very tail (e.g. "<PA", "<|de", "<|/re")
+  for (let k = Math.min(7, n); k > 0; k -= 1) {
+    const tail = s.slice(n - k);
+    let isPrefix = false;
+    for (const mk of MARKER_LITERALS) {
+      if (mk.length > k && mk.startsWith(tail)) { isPrefix = true; break; }
+    }
+    if (isPrefix) { cut = Math.min(cut, n - k); break; }
+  }
+
+  if (cap && n - cut > cap) return n; // stale/malformed opener: stop holding back
+  return cut;
+}
+
+// Marker/page state machine + grounding buffer. `page` is the page currently
+// being parsed — every box attaches to it.
+export function createGroundState() {
+  return {
+    buf: '',
+    page: 1,
+    // Job start: page 1 counts as pre-announced, so the very first <PAGE>
+    // marker of the stream is consumed as its confirmation (no advance).
+    expectAnnounce: true,
+    ocrSeen: false,
+    markerCount: 0,
+    totalPages: 0,
+  };
+}
+
+// Apply one progress event to the state machine.
+// Only phase==="ocr" may drive page tracking: the render phase emits
+// current_page=1..N in quick succession while rasterizing (before any token
+// exists) and merge walks the pages again — adopting either would pin the
+// page at N and pile every box onto the last page.
+export function groundAnnounce(g, phase, currentPage, totalPages) {
+  const out = { firstOcr: false, pageChanged: false, totalChanged: false };
+  const total = Number(totalPages) || 0;
+  if (total > g.totalPages) { g.totalPages = total; out.totalChanged = true; }
+  if (phase !== 'ocr') return out;
+
+  if (!g.ocrSeen) {
+    g.ocrSeen = true;
+    out.firstOcr = true;
+    if (g.page !== 1) { g.page = 1; out.pageChanged = true; } // stale pre-OCR advancement guard
+  }
+  // The next <PAGE> marker is the start-of-page confirmation of this
+  // announcement — it must not advance the page again.
+  g.expectAnnounce = true;
+  const cur = Number(currentPage) || 0;
+  const target = g.totalPages ? Math.min(cur, g.totalPages) : cur;
+  if (target > g.page) { g.page = target; out.pageChanged = true; } // never backwards
+  return out;
+}
+
+export function groundPush(g, text) {
+  if (text) g.buf += text;
+}
+
+// Drain the grounding buffer: emit COMPLETE det/ref matches and apply <PAGE>
+// markers in positional order, then consume up to the last complete match.
+// The remainder is kept only from the first potentially-incomplete structure
+// onward (see incompleteTailIndex), so matches split across SSE chunk
+// boundaries are parsed exactly once, after they fully assemble.
+// Returns events: {type:'page', page} | {type:'boxes', page, label, boxes:[{x1,y1,x2,y2}]}
+export function groundDrain(g, final) {
+  const out = [];
+  const buf = g.buf;
+  if (!buf) return out;
+
+  const events = [];
+  let m;
+  // inline dets: <|det|>label [x1,y1,x2,y2]<|/det|>
+  const reDet = /<\|det\|>\s*([A-Za-z_][\w-]*)\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]\s*<\|\/det\|>/g;
+  while ((m = reDet.exec(buf)) !== null) {
+    events.push({
+      start: m.index,
+      end: reDet.lastIndex,
+      label: m[1],
+      quads: [[Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])]],
+    });
+  }
+  // ref blocks: <|ref|>label<|/ref|><|det|>[[x1,y1,x2,y2],...]<|/det|>
+  const reRef = /<\|ref\|>([^<]{1,40})<\|\/ref\|><\|det\|>(\[\[?[\d,\s\[\]]*\]\]?)<\|\/det\|>/g;
+  while ((m = reRef.exec(buf)) !== null) {
+    events.push({ start: m.index, end: reRef.lastIndex, label: m[1].trim(), quads: scanQuads(m[2]) });
+  }
+  // page markers
+  let idx = -1;
+  while ((idx = buf.indexOf(PAGE_MARKER, idx + 1)) !== -1) {
+    events.push({ start: idx, end: idx + PAGE_MARKER.length, page: true });
+  }
+
+  events.sort((a, b) => a.start - b.start);
+  let pos = 0;
+  for (const ev of events) {
+    if (ev.start < pos) continue;
+    if (ev.page) {
+      g.markerCount += 1;
+      if (g.expectAnnounce) {
+        g.expectAnnounce = false; // start-of-page confirmation of the announced page
+      } else {
+        const next = g.totalPages ? Math.min(g.page + 1, g.totalPages) : g.page + 1;
+        if (next > g.page) {
+          g.page = next;
+          out.push({ type: 'page', page: g.page });
+        }
+      }
+    } else {
+      const boxes = [];
+      for (const q of ev.quads) {
+        const x1 = clampCoord(q[0]), y1 = clampCoord(q[1]), x2 = clampCoord(q[2]), y2 = clampCoord(q[3]);
+        if (x2 <= x1 || y2 <= y1) continue; // degenerate box
+        boxes.push({ x1, y1, x2, y2 });
+      }
+      if (boxes.length) out.push({ type: 'boxes', page: g.page, label: ev.label, boxes });
+    }
+    pos = ev.end;
+  }
+
+  if (final) { g.buf = ''; return out; }
+  const rest = buf.slice(pos);
+  g.buf = rest.slice(incompleteTailIndex(rest, 1200));
+  return out;
+}
+
+// Build STRUCTURED markdown from the raw stream for the live preview pane.
+// The model carries structure only in det labels — a flat cleanup collapses
+// everything into run-on paragraphs. Instead each det block becomes its own
+// markdown block: title → "## ", image → placeholder blockquote, page
+// furniture → dropped, everything else (text / raw <table> html / LaTeX) →
+// its own paragraph. <PAGE> → "---" separator. Blank lines between blocks.
+export function structurePreview(raw, final) {
+  let s = raw;
+  if (!final) s = s.slice(0, incompleteTailIndex(s, 2000));
+  if (!s) return '';
+
+  // structural tokens, position-ordered
+  const toks = [];
+  let m;
+  const reDet = /<\|det\|>\s*([A-Za-z_][\w-]*)\s*\[\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\]\s*<\|\/det\|>/g;
+  while ((m = reDet.exec(s)) !== null) toks.push({ start: m.index, end: reDet.lastIndex, label: m[1] });
+  const reRef = /<\|ref\|>([^<]{1,40})<\|\/ref\|><\|det\|>\[\[?[\d,\s\[\]]*\]\]?<\|\/det\|>/g;
+  while ((m = reRef.exec(s)) !== null) toks.push({ start: m.index, end: reRef.lastIndex, label: m[1].trim(), ref: true });
+  let idx = -1;
+  while ((idx = s.indexOf(PAGE_MARKER, idx + 1)) !== -1) {
+    toks.push({ start: idx, end: idx + PAGE_MARKER.length, page: true });
+  }
+  toks.sort((a, b) => a.start - b.start);
+
+  const parts = [];
+  const pushSep = () => {
+    if (parts.length && parts[parts.length - 1] !== '---') parts.push('---'); // no leading/duplicate hr
+  };
+  const pushBlock = (label, text) => {
+    const key = normalizeLabel(label);
+    if (DROP_LABELS.has(key)) return;
+    if (key === 'image') { parts.push(IMAGE_BLOCK); return; }
+    const body = String(text).replace(/<\|[^|>]{0,64}\|>/g, '').trim(); // strip stray specials
+    if (!body) return;
+    if (key === 'title') parts.push('## ' + body.replace(/\s*\n+\s*/g, ' '));
+    else parts.push(body); // text / table(raw html) / equation(LaTeX literal) / unknown
+  };
+
+  let pos = 0;
+  let currentLabel = null; // det label owning the text that follows it
+  for (const t of toks) {
+    if (t.start < pos) continue; // overlap safety
+    pushBlock(currentLabel, s.slice(pos, t.start));
+    if (t.page) {
+      pushSep();
+      currentLabel = null;
+    } else if (normalizeLabel(t.label) === 'image') {
+      pushBlock('image', '');
+      currentLabel = null;
+    } else if (t.ref) {
+      currentLabel = null; // non-image ref: grounding only, no reading content
+    } else {
+      currentLabel = t.label;
+    }
+    pos = t.end;
+  }
+  pushBlock(currentLabel, s.slice(pos));
+
+  if (final && parts.length && parts[parts.length - 1] === '---') parts.pop();
+  return parts.join('\n\n');
+}
+
+/* ============================ UI constants ============================ */
 
 const PHASE_LABELS = { render: '렌더링', ocr: 'OCR', merge: '병합' };
 const STATUS_LABELS = {
@@ -18,11 +259,7 @@ const STATUS_LABELS = {
   error: '오류',
   canceled: '취소됨',
 };
-const PAGE_MARKER = '<PAGE>';
 const THEME_KEY = 'uocr-theme';
-const IMG_PLACEHOLDER = '\n\n> 🖼 그림 감지됨\n\n';
-// literals whose partial prefix at a chunk boundary must be held back
-const MARKER_LITERALS = ['<PAGE>', '<|ref|>', '<|/ref|>', '<|det|>', '<|/det|>'];
 
 const BOX_COLORS = {
   title: '#e5484d',
@@ -54,19 +291,16 @@ const state = {
   selectedFile: null,
   // raw stream pane
   streamPending: '',
-  streamPageNo: 1,
+  streamPageNo: 0, // markers seen by the raw pane — divider k reads "페이지 k"
   streamAutoScroll: true,
   streamConnected: false,
   rafId: 0,
-  // accumulated raw model output (for cleaning + preview)
+  // accumulated raw model output (for the preview structurer)
   rawText: '',
-  // grounding parser
-  groundBuf: '',
-  boxPage: 1,          // page the stream is currently parsing (boxes attach here)
-  viewPage: 1,         // page shown in the left pane
+  // grounding state machine (pure core) + left-pane view state
+  ground: createGroundState(),
+  viewPage: 1,          // page shown in the left pane
   followLive: true,
-  ocrSeen: false,      // true once an OCR-phase progress event arrived for this job
-  totalPages: 0,
   pageBoxes: new Map(), // pageNo -> [{label,x1,y1,x2,y2}]
   imgFailed: false,
   imgLastTry: 0,
@@ -524,7 +758,7 @@ async function syncOpenJob() {
   if (state.currentJobId !== id) return;
   if (isTerminal(job.status)) {
     flushStream(true);
-    processGroundBuf(true);
+    drainGroundToUI(true);
     teardownConnections();
   }
   renderJob(job);
@@ -551,20 +785,14 @@ function renderJob(job) {
   setStopButton(job.status);
 
   if (running) {
-    updateProgress(job.progress || {}, job.status);
     const p = job.progress || {};
-    const total = Number(p.total_pages) || 0;
-    if (total > state.totalPages) state.totalPages = total;
-    // Same phase gate as applyProgress: only an OCR-phase snapshot may seed
-    // the box page (job opened mid-OCR); render/merge snapshots must not pin.
-    if (p.phase === 'ocr') {
-      state.ocrSeen = true;
-      const cur = Number(p.current_page) || 0;
-      if (cur > state.boxPage) {
-        state.boxPage = state.totalPages ? Math.min(cur, state.totalPages) : cur;
-        if (state.followLive) state.viewPage = state.boxPage;
-      }
-    }
+    updateProgress(p, job.status);
+    // A status snapshot goes through the same announce machine as SSE
+    // progress (phase-gated: an OCR snapshot seeds the page when opening a
+    // job mid-OCR; render/merge snapshots must not pin it).
+    const r = groundAnnounce(state.ground, p.phase, p.current_page, p.total_pages);
+    if (r.firstOcr && state.pageBoxes.size > 0) state.pageBoxes = new Map();
+    if (state.followLive) state.viewPage = state.ground.page;
     updateLeftPane();
   }
   if (done) renderResult(job);
@@ -582,6 +810,9 @@ function hasLiveContent() {
 
 /* ============================ Progress ============================ */
 
+// The progress BAR consumes every phase (render progress is real progress);
+// page tracking for the left pane is delegated to groundAnnounce, which
+// filters to phase==="ocr".
 function updateProgress(p, status) {
   const queued = status === 'queued';
   const total = Number(p.total_pages) || 0;
@@ -624,32 +855,17 @@ function applyProgress(d) {
   setStopButton(status);
   updateProgress(d, status);
 
-  // sync the left pane with progress info
-  const total = Number(d.total_pages) || 0;
-  if (total > state.totalPages) {
-    state.totalPages = total;
-    updateLeftPane();
+  // Drain buffered markers/boxes FIRST so content preceding this announcement
+  // stays attributed to its own page, then apply the announcement.
+  drainGroundToUI(false);
+  const r = groundAnnounce(state.ground, d.phase, d.current_page, d.total_pages);
+  if (r.firstOcr && state.pageBoxes.size > 0) {
+    state.pageBoxes = new Map(); // stale pre-OCR boxes (rerun leftovers)
+    renderOverlay();
   }
-  // drain parsed-but-buffered grounding events before adopting a page bump,
-  // so buffered boxes stay attributed to their own page
-  processGroundBuf(false);
-  // Only OCR-phase progress may advance the box page. The render phase emits
-  // current_page=1..N in quick succession while rasterizing (before any token
-  // exists), and merge walks the pages again after OCR — adopting either would
-  // pin boxPage at N and pile every box onto the last page.
-  if (d.phase === 'ocr') {
-    if (!state.ocrSeen) {
-      state.ocrSeen = true;
-      // stale pre-OCR advancement (e.g. rerun leftovers): restart box tracking
-      if (state.boxPage !== 1 || state.pageBoxes.size > 0) {
-        state.boxPage = 1;
-        state.pageBoxes = new Map();
-        if (state.followLive) state.viewPage = 1;
-        updateLeftPane();
-      }
-    }
-    const cur = Number(d.current_page) || 0;
-    if (cur > state.boxPage) bumpBoxPageTo(cur); // per_page mode / chunk boundaries (no <PAGE> marker)
+  if (r.pageChanged || r.firstOcr || r.totalChanged) {
+    if (state.followLive) state.viewPage = state.ground.page;
+    updateLeftPane();
   }
   retryPageImageIfNeeded();
 }
@@ -665,16 +881,13 @@ function resetLiveState() {
   state.previewFails = 0;
   state.previewAutoScroll = true;
   state.streamPending = '';
-  state.streamPageNo = 1;
+  state.streamPageNo = 0;
   state.streamAutoScroll = true;
   state.streamConnected = false;
   state.rawText = '';
-  state.groundBuf = '';
-  state.boxPage = 1;
+  state.ground = createGroundState();
   state.viewPage = 1;
   state.followLive = true;
-  state.ocrSeen = false;
-  state.totalPages = 0;
   state.pageBoxes = new Map();
   state.imgFailed = false;
   state.imgLastTry = 0;
@@ -700,7 +913,7 @@ function enqueueToken(text) {
   if (!text) return;
   state.streamPending += text;
   state.rawText += text;
-  state.groundBuf += text;
+  groundPush(state.ground, text);
   scheduleFlush();
 }
 
@@ -709,13 +922,15 @@ function scheduleFlush() {
   state.rafId = requestAnimationFrame(() => {
     state.rafId = 0;
     flushStream(false);
-    processGroundBuf(false);
+    drainGroundToUI(false);
     schedulePreviewRender();
   });
 }
 
-// Append pending stream text, converting <PAGE> markers into page-break dividers.
-// A partial marker at the tail is held back (unless final) so it is never split.
+// Append pending stream text, converting <PAGE> markers into page-break
+// dividers. Divider k reads "페이지 k" — marker k announces page k (each
+// page's stream segment BEGINS with its marker). A partial marker at the
+// tail is held back (unless final) so it is never split.
 function flushStream(final) {
   const buf = state.streamPending;
   state.streamPending = '';
@@ -767,121 +982,34 @@ function onStreamScroll() {
   state.streamAutoScroll = (pane.scrollHeight - pane.scrollTop - pane.clientHeight) < 24;
 }
 
-/* ============================ Grounding parser (left pane) ============================ */
-//
-// The token stream is also fed into state.groundBuf. On every rAF flush we
-// extract COMPLETE grounding matches (inline dets, ref blocks) and <PAGE>
-// markers in positional order, then consume the buffer up to the last complete
-// match. Whatever remains is kept only from the first potentially-incomplete
-// structure onward (an unclosed <|ref|>/<|det|> block, an unterminated <|…,
-// or a partial marker prefix at the tail), so matches split across SSE chunk
-// boundaries are parsed exactly once, after they fully assemble.
+/* ============================ Grounding → left pane ============================ */
 
-function scanQuads(payload) {
-  const nums = String(payload).match(/\d+/g);
-  if (!nums) return [];
-  const quads = [];
-  for (let i = 0; i + 3 < nums.length; i += 4) {
-    quads.push([Number(nums[i]), Number(nums[i + 1]), Number(nums[i + 2]), Number(nums[i + 3])]);
-  }
-  return quads;
-}
-
-// Index from which `s` may contain an incomplete grounding structure / marker.
-// Returns s.length when the whole string is safe to consume. `cap` guards
-// against holding back forever on a malformed block that never closes.
-function incompleteTailIndex(s, cap) {
-  const n = s.length;
-  let cut = n;
-
-  // an opened ref block that has not seen its closing <|/det|> yet
-  const lastRef = s.lastIndexOf('<|ref|>');
-  if (lastRef !== -1 && s.indexOf('<|/det|>', lastRef) === -1) cut = Math.min(cut, lastRef);
-
-  // an opened det that has not closed yet
-  const lastDet = s.lastIndexOf('<|det|>');
-  if (lastDet !== -1 && s.indexOf('<|/det|>', lastDet + 7) === -1) cut = Math.min(cut, lastDet);
-
-  // an unterminated special token: "<|" with no "|>" after it
-  const lastPipe = s.lastIndexOf('<|');
-  if (lastPipe !== -1 && s.indexOf('|>', lastPipe + 2) === -1) cut = Math.min(cut, lastPipe);
-
-  // a partial literal prefix at the very tail (e.g. "<PA", "<|de", "<|/re")
-  for (let k = Math.min(7, n); k > 0; k -= 1) {
-    const tail = s.slice(n - k);
-    let isPrefix = false;
-    for (const mk of MARKER_LITERALS) {
-      if (mk.length > k && mk.startsWith(tail)) { isPrefix = true; break; }
-    }
-    if (isPrefix) { cut = Math.min(cut, n - k); break; }
-  }
-
-  if (cap && n - cut > cap) return n; // stale/malformed opener: stop holding back
-  return cut;
-}
-
-function processGroundBuf(final) {
-  const buf = state.groundBuf;
-  if (!buf) return;
-
-  const events = [];
-  let m;
-  // inline dets: <|det|>label [x1,y1,x2,y2]<|/det|>
-  const reDet = /<\|det\|>\s*([A-Za-z_][\w-]*)\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]\s*<\|\/det\|>/g;
-  while ((m = reDet.exec(buf)) !== null) {
-    events.push({
-      start: m.index,
-      end: reDet.lastIndex,
-      label: m[1],
-      quads: [[Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5])]],
-    });
-  }
-  // ref blocks: <|ref|>label<|/ref|><|det|>[[x1,y1,x2,y2],...]<|/det|>
-  const reRef = /<\|ref\|>([^<]{1,40})<\|\/ref\|><\|det\|>(\[\[?[\d,\s\[\]]*\]\]?)<\|\/det\|>/g;
-  while ((m = reRef.exec(buf)) !== null) {
-    events.push({ start: m.index, end: reRef.lastIndex, label: m[1].trim(), quads: scanQuads(m[2]) });
-  }
-  // page markers (advance the box page in stream order)
-  let idx = -1;
-  while ((idx = buf.indexOf(PAGE_MARKER, idx + 1)) !== -1) {
-    events.push({ start: idx, end: idx + PAGE_MARKER.length, page: true });
-  }
-
-  events.sort((a, b) => a.start - b.start);
-  let pos = 0;
+function drainGroundToUI(final) {
+  const events = groundDrain(state.ground, final);
+  if (!events.length) return;
+  let pageMoved = false;
   for (const ev of events) {
-    if (ev.start < pos) continue;
-    if (ev.page) bumpBoxPageTo(state.boxPage + 1);
-    else if (ev.quads.length) addBoxes(state.boxPage, ev.label, ev.quads);
-    pos = ev.end;
+    if (ev.type === 'page') pageMoved = true;
+    else addBoxes(ev.page, ev.label, ev.boxes);
   }
-
-  if (final) { state.groundBuf = ''; return; }
-  const rest = buf.slice(pos);
-  state.groundBuf = rest.slice(incompleteTailIndex(rest, 1200));
+  if (pageMoved) {
+    if (state.followLive) state.viewPage = state.ground.page;
+    updateLeftPane();
+  }
 }
 
 function labelColor(label) {
-  const key = String(label || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  return BOX_COLORS[key] || BOX_FALLBACK_COLOR;
+  return BOX_COLORS[normalizeLabel(label)] || BOX_FALLBACK_COLOR;
 }
 
-const clamp999 = (v) => Math.max(0, Math.min(999, Number(v) || 0));
-
-function addBoxes(page, label, quads) {
-  const boxes = [];
-  for (const q of quads) {
-    const x1 = clamp999(q[0]), y1 = clamp999(q[1]), x2 = clamp999(q[2]), y2 = clamp999(q[3]);
-    if (x2 <= x1 || y2 <= y1) continue; // degenerate box
-    boxes.push({ label, x1, y1, x2, y2 });
-  }
-  if (!boxes.length) return;
+function addBoxes(page, label, boxes) {
   let arr = state.pageBoxes.get(page);
   if (!arr) { arr = []; state.pageBoxes.set(page, arr); }
-  for (const b of boxes) arr.push(b);
+  const labeled = boxes.map((b) => ({ label, x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2 }));
+  for (const b of labeled) arr.push(b);
   if (page === state.viewPage) {
     const frag = document.createDocumentFragment();
-    for (const b of boxes) frag.appendChild(makeBoxEl(b, true));
+    for (const b of labeled) frag.appendChild(makeBoxEl(b, true));
     el.boxOverlay.appendChild(frag);
   }
 }
@@ -897,17 +1025,6 @@ function makeBoxEl(b, animate) {
   return div;
 }
 
-// Advance the live parse page — driven by <PAGE> markers (multi mode) or
-// progress.current_page (per_page mode / chunk boundaries), whichever moves
-// first. Never goes backwards; capped at total_pages when known.
-function bumpBoxPageTo(n) {
-  const target = state.totalPages ? Math.min(n, state.totalPages) : n;
-  if (target <= state.boxPage) return;
-  state.boxPage = target;
-  if (state.followLive) state.viewPage = target;
-  updateLeftPane();
-}
-
 function pageImageUrl(id, n) {
   return `/api/jobs/${id}/files/pages/page_${String(n).padStart(4, '0')}.png`;
 }
@@ -915,7 +1032,8 @@ function pageImageUrl(id, n) {
 function updateLeftPane() {
   const id = state.currentJobId;
   if (!id) return;
-  const total = Math.max(state.totalPages || 0, state.boxPage, 1);
+  const g = state.ground;
+  const total = Math.max(g.totalPages || 0, g.page, 1);
   if (state.viewPage > total) state.viewPage = total;
 
   el.pagerLabel.textContent = `${state.viewPage} / ${total}`;
@@ -942,11 +1060,12 @@ function renderOverlay() {
 }
 
 function pageNav(dir) {
-  const total = Math.max(state.totalPages || 0, state.boxPage, 1);
+  const g = state.ground;
+  const total = Math.max(g.totalPages || 0, g.page, 1);
   const next = Math.min(total, Math.max(1, state.viewPage + dir));
   if (next === state.viewPage) return;
   state.viewPage = next;
-  state.followLive = next === state.boxPage; // paging away disables follow; reaching the live page re-enables
+  state.followLive = next === g.page; // paging away disables follow; reaching the live page re-enables
   updateLeftPane();
 }
 
@@ -977,29 +1096,6 @@ function retryPageImageIfNeeded() {
 
 /* ============================ Live rendered preview (right pane) ============================ */
 
-function isImageInlineLabel(inner) {
-  const m = /^\s*([A-Za-z_][\w-]*)/.exec(String(inner));
-  return !!m && m[1].toLowerCase() === 'image';
-}
-
-// Clean accumulated raw text for server-side rendering (order matters):
-// tail holdback → ref blocks → inline dets → <PAGE> → stray specials.
-function cleanRawText(raw, final) {
-  let s = raw;
-  if (!final) s = s.slice(0, incompleteTailIndex(s, 2000));
-  s = s.replace(
-    /<\|ref\|>([\s\S]{0,80}?)<\|\/ref\|><\|det\|>[\s\S]{0,400}?<\|\/det\|>/g,
-    (mm, label) => (String(label).trim().toLowerCase() === 'image' ? IMG_PLACEHOLDER : ''),
-  );
-  s = s.replace(
-    /<\|det\|>([^<]{0,160}?)<\|\/det\|>/g,
-    (mm, inner) => (isImageInlineLabel(inner) ? IMG_PLACEHOLDER : ''),
-  );
-  s = s.replace(/<PAGE>/g, '\n\n---\n\n');
-  s = s.replace(/<\|[^|>]{0,64}\|>/g, '');
-  return s;
-}
-
 function schedulePreviewRender() {
   state.previewDirty = true;
   if (state.previewTimer || state.previewInFlight) return;
@@ -1022,8 +1118,8 @@ async function runPreviewRender() {
   const gen = state.liveGen;
   state.previewDirty = false;
 
-  const cleaned = cleanRawText(state.rawText, false);
-  if (!cleaned.trim()) { maybeReschedulePreview(); return; }
+  const structured = structurePreview(state.rawText, false);
+  if (!structured.trim()) { maybeReschedulePreview(); return; }
 
   state.previewInFlight = true;
   let html = null;
@@ -1031,7 +1127,7 @@ async function runPreviewRender() {
     const res = await fetch(`/api/jobs/${id}/render-preview`, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-      body: cleaned,
+      body: structured,
     });
     if (res.ok) html = await res.text();
   } catch (_) { /* network error → retried on the next schedule */ }
@@ -1201,7 +1297,7 @@ function startFallbackPolling(id) {
       state.fallbackTimer = 0;
       state.fallbackActive = false;
       flushStream(true);
-      processGroundBuf(true);
+      drainGroundToUI(true);
       renderJob(job);
       refreshJobs();
     } else {
@@ -1213,7 +1309,7 @@ function startFallbackPolling(id) {
 async function onJobDone(id, data) {
   if (state.currentJobId !== id) return;
   flushStream(true);
-  processGroundBuf(true);
+  drainGroundToUI(true);
   teardownConnections();
   state.displayedStatus = 'done';
   updateHeaderChip('done');
@@ -1250,7 +1346,7 @@ async function onJobDone(id, data) {
 function onJobError(id, d) {
   if (state.currentJobId !== id) return;
   flushStream(true);
-  processGroundBuf(true);
+  drainGroundToUI(true);
   teardownConnections();
   const canceled = !!(d && d.canceled);
   state.displayedStatus = canceled ? 'canceled' : 'error';
@@ -1619,7 +1715,7 @@ function init() {
   el.pagerNext.addEventListener('click', () => pageNav(1));
   el.followChip.addEventListener('click', () => {
     state.followLive = true;
-    state.viewPage = state.boxPage;
+    state.viewPage = state.ground.page;
     updateLeftPane();
   });
   el.pageImg.addEventListener('load', onPageImgLoad);
@@ -1633,8 +1729,12 @@ function init() {
   window.addEventListener('beforeunload', teardownConnections);
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
-} else {
-  init();
+// Browser bootstrap only — the module is also imported by frontend/tests/
+// under Node, where no DOM exists (only the exported pure core is used).
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 }

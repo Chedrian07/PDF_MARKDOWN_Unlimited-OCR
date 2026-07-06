@@ -1,0 +1,44 @@
+retry: 3000
+
+event: progress
+data: {"phase": "render", "current_page": 2, "total_pages": 3, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "render", "current_page": 3, "total_pages": 3, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 1, "total_pages": 3, "chunk": 1, "total_chunks": 2, "status": "running"}
+
+event: token
+data: {"text": "<PAGE>\n## 페이지 1 — page_0001\n\n이 문서는 FakeEngine이 생성한 데모 출력입니다. 실제 모델을 사용하려면\n`OCR_ENGINE=unlimited`로 실행하세요.\n\n| 항목 | 값 |\n| --- | --- |\n| 페이지 | 1 |\n| 원본 | page_0001 |\n\n![](images/page_0_0.jpg)\n\n본문 텍스트 예시입니다. Unlimited-OCR은 문서의 레이아웃을 인식해 표, 수식,\n그림을 마크다운으로 변환합니다."}
+
+event: progress
+data: {"phase": "ocr", "current_page": 2, "total_pages": 3, "chunk": 1, "total_chunks": 2, "status": "running"}
+
+event: token
+data: {"text": "\n<PAGE>\n"}
+
+event: token
+data: {"text": "## 페이지 2 — page_0002\n\n이 문서는 FakeEngine이 생성한 데모 출력입니다. 실제 모델을 사용하려면\n`OCR_ENGINE=unlimited`로 실행하세요.\n\n| 항목 | 값 |\n| --- | --- |\n| 페이지 | 2 |\n| 원본 | page_0002 |\n\n![](images/page_1_0.jpg)\n\n본문 텍스트 예시입니다. Unlimited-OCR은 문서의 레이아웃을 인식해 표, 수식,\n그림을 마크다운으로 변환합니다.\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 2, "total_pages": 3, "chunk": 1, "total_chunks": 2, "status": "running"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 3, "total_pages": 3, "chunk": 2, "total_chunks": 2, "status": "running"}
+
+event: token
+data: {"text": "<PAGE>\n## 페이지 1 — page_0003\n\n이 문서는 FakeEngine이 생성한 데모 출력입니다. 실제 모델을 사용하려면\n`OCR_ENGINE=unlimited`로 실행하세요.\n\n| 항목 | 값 |\n| --- | --- |\n| 페이지 | 1 |\n| 원본 | page_0003 |\n\n![](images/page_0_0.jpg)\n\n본문 텍스트 예시입니다. Unlimited-OCR은 문서의 레이아웃을 인식해 표, 수식,\n그림을 마크다운으로 변환합니다."}
+
+event: token
+data: {"text": "\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 3, "total_pages": 3, "chunk": 2, "total_chunks": 2, "status": "running"}
+
+event: progress
+data: {"phase": "merge", "current_page": 3, "total_pages": 3, "chunk": 2, "total_chunks": 2, "status": "running"}
+
+event: done
+data: {"markdown_url": "/api/jobs/j_6a178ca60199/markdown", "archive_url": "/api/jobs/j_6a178ca60199/archive"}
+

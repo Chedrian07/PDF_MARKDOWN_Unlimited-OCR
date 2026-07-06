@@ -816,6 +816,36 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 .markdown-body th { background: var(--bg-sunken); font-weight: 600; }
 .markdown-body tr:nth-child(even) td { background: color-mix(in srgb, var(--bg-sunken) 55%, transparent); }
 
+/* ---- Live preview block cards (GIF-style det blocks) --------------------- */
+/* Each top-level element of the live preview = one det block → card look.   */
+.live-preview.markdown-body > * {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+}
+.live-preview.markdown-body > h2 {
+  font-size: 1.02em;
+  font-weight: 650;
+  border: 1px solid color-mix(in srgb, #e5484d 30%, var(--border));
+  border-left: 3px solid #e5484d; /* title det color */
+  background: color-mix(in srgb, #e5484d 5%, transparent);
+}
+.live-preview.markdown-body > blockquote {
+  border: 1px solid color-mix(in srgb, #2f9e6e 30%, var(--border));
+  border-left: 3px solid #2f9e6e; /* image det color */
+  color: var(--text-muted);
+}
+.live-preview.markdown-body > hr {
+  border: none;
+  border-top: 1px dashed var(--border-strong);
+  border-radius: 0;
+  padding: 0;
+  margin: 6px 0 14px;
+}
+.live-preview.markdown-body > table { display: block; overflow-x: auto; }
+.live-preview.markdown-body > pre { overflow-x: auto; }
+
 /* ---- Toast -------------------------------------------------------------- */
 .toast {
   position: fixed;

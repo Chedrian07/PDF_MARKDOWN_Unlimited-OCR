@@ -1,0 +1,413 @@
+retry: 3000
+
+event: progress
+data: {"phase": "render", "current_page": 0, "total_pages": 0, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "render", "current_page": 1, "total_pages": 2, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "render", "current_page": 2, "total_pages": 2, "chunk": 0, "total_chunks": 0, "status": "running"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 1, "total_pages": 2, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "<PAGE><|det|>title "}
+
+event: token
+data: {"text": "[118, "}
+
+event: token
+data: {"text": "76, "}
+
+event: token
+data: {"text": "705, "}
+
+event: token
+data: {"text": "106]<|/det|>Unlimited-OCR "}
+
+event: token
+data: {"text": "End-to-End "}
+
+event: token
+data: {"text": "Sample\n"}
+
+event: token
+data: {"text": "<|det|>text "}
+
+event: token
+data: {"text": "[116, "}
+
+event: token
+data: {"text": "120, "}
+
+event: token
+data: {"text": "588, "}
+
+event: token
+data: {"text": "157]<|/det|>This "}
+
+event: token
+data: {"text": "document "}
+
+event: token
+data: {"text": "validates "}
+
+event: token
+data: {"text": "PDF "}
+
+event: token
+data: {"text": "to "}
+
+event: token
+data: {"text": "Markdown "}
+
+event: token
+data: {"text": "conversion, "}
+
+event: token
+data: {"text": "including "}
+
+event: token
+data: {"text": "embedded "}
+
+event: token
+data: {"text": "figure "}
+
+event: token
+data: {"text": "extraction "}
+
+event: token
+data: {"text": "and "}
+
+event: token
+data: {"text": "table "}
+
+event: token
+data: {"text": "structure.\n"}
+
+event: token
+data: {"text": "<|det|>image "}
+
+event: token
+data: {"text": "[119, "}
+
+event: token
+data: {"text": "175, "}
+
+event: token
+data: {"text": "875, "}
+
+event: token
+data: {"text": "476]<|/det|>\n"}
+
+event: token
+data: {"text": "<|det|>text "}
+
+event: token
+data: {"text": "[117, "}
+
+event: token
+data: {"text": "497, "}
+
+event: token
+data: {"text": "388, "}
+
+event: token
+data: {"text": "515]<|/det|>Table "}
+
+event: token
+data: {"text": "1. "}
+
+event: token
+data: {"text": "Model "}
+
+event: token
+data: {"text": "configurations\n"}
+
+event: token
+data: {"text": "<|det|>table "}
+
+event: token
+data: {"text": "[109, "}
+
+event: token
+data: {"text": "520, "}
+
+event: token
+data: {"text": "860, "}
+
+event: token
+data: {"text": "596]<|/det|><table><tr><td>Mode</td><td>base_size</td><td>image_size</td><td>crop</td></tr><tr><td>gundam</td><td>1024</td><td>640</td><td>true</td></tr><tr><td>base</td><td>1024</td><td>1024</td><td>false</td></tr></table>\n"}
+
+event: token
+data: {"text": "<|det|>text "}
+
+event: token
+data: {"text": "[117, "}
+
+event: token
+data: {"text": "676, "}
+
+event: token
+data: {"text": "726, "}
+
+event: token
+data: {"text": "694]<|/det|>The "}
+
+event: token
+data: {"text": "pricing "}
+
+event: token
+data: {"text": "follows "}
+
+event: token
+data: {"text": " "}
+
+event: token
+data: {"text": "\\( "}
+
+event: token
+data: {"text": "E "}
+
+event: token
+data: {"text": "= "}
+
+event: token
+data: {"text": "mc^{2} "}
+
+event: token
+data: {"text": "\\) "}
+
+event: token
+data: {"text": " "}
+
+event: token
+data: {"text": "style "}
+
+event: token
+data: {"text": "notation "}
+
+event: token
+data: {"text": "and "}
+
+event: token
+data: {"text": "includes "}
+
+event: token
+data: {"text": "3.3B "}
+
+event: token
+data: {"text": "parameters.\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 2, "total_pages": 2, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: token
+data: {"text": "<PAGE><|det|>title "}
+
+event: token
+data: {"text": "[117, "}
+
+event: token
+data: {"text": "80, "}
+
+event: token
+data: {"text": "497, "}
+
+event: token
+data: {"text": "106]<|/det|>Section "}
+
+event: token
+data: {"text": "2: "}
+
+event: token
+data: {"text": "Figures "}
+
+event: token
+data: {"text": "and "}
+
+event: token
+data: {"text": "Lists\n"}
+
+event: token
+data: {"text": "<|det|>image "}
+
+event: token
+data: {"text": "[119, "}
+
+event: token
+data: {"text": "130, "}
+
+event: token
+data: {"text": "728, "}
+
+event: token
+data: {"text": "416]<|/det|>\n"}
+
+event: token
+data: {"text": "<|det|>text "}
+
+event: token
+data: {"text": "[138, "}
+
+event: token
+data: {"text": "451, "}
+
+event: token
+data: {"text": "513, "}
+
+event: token
+data: {"text": "469]<|/det|>- "}
+
+event: token
+data: {"text": "First "}
+
+event: token
+data: {"text": "bullet "}
+
+event: token
+data: {"text": "item "}
+
+event: token
+data: {"text": "about "}
+
+event: token
+data: {"text": "long-horizon "}
+
+event: token
+data: {"text": "parsing.\n"}
+
+event: token
+data: {"text": "<|det|>text "}
+
+event: token
+data: {"text": "[138, "}
+
+event: token
+data: {"text": "477, "}
+
+event: token
+data: {"text": "484, "}
+
+event: token
+data: {"text": "493]<|/det|>- "}
+
+event: token
+data: {"text": "Second "}
+
+event: token
+data: {"text": "bullet "}
+
+event: token
+data: {"text": "item "}
+
+event: token
+data: {"text": "about "}
+
+event: token
+data: {"text": "page "}
+
+event: token
+data: {"text": "markers.\n"}
+
+event: token
+data: {"text": "<|det|>text "}
+
+event: token
+data: {"text": "[138, "}
+
+event: token
+data: {"text": "503, "}
+
+event: token
+data: {"text": "538, "}
+
+event: token
+data: {"text": "520]<|/det|>- "}
+
+event: token
+data: {"text": "Third "}
+
+event: token
+data: {"text": "bullet "}
+
+event: token
+data: {"text": "item "}
+
+event: token
+data: {"text": "about "}
+
+event: token
+data: {"text": "figure "}
+
+event: token
+data: {"text": "grounding "}
+
+event: token
+data: {"text": "boxes.\n"}
+
+event: token
+data: {"text": "<|det|>list "}
+
+event: token
+data: {"text": "[138, "}
+
+event: token
+data: {"text": "451, "}
+
+event: token
+data: {"text": "538, "}
+
+event: token
+data: {"text": "520]<|/det|>\n"}
+
+event: token
+data: {"text": "<|det|>text "}
+
+event: token
+data: {"text": "[117, "}
+
+event: token
+data: {"text": "558, "}
+
+event: token
+data: {"text": "409, "}
+
+event: token
+data: {"text": "575]<|/det|>End "}
+
+event: token
+data: {"text": "of "}
+
+event: token
+data: {"text": "sample "}
+
+event: token
+data: {"text": "document. "}
+
+event: token
+data: {"text": "Page "}
+
+event: token
+data: {"text": "2 "}
+
+event: token
+data: {"text": "of "}
+
+event: token
+data: {"text": "2.\n"}
+
+event: token
+data: {"text": "\n"}
+
+event: progress
+data: {"phase": "ocr", "current_page": 2, "total_pages": 2, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: progress
+data: {"phase": "merge", "current_page": 2, "total_pages": 2, "chunk": 1, "total_chunks": 1, "status": "running"}
+
+event: done
+data: {"markdown_url": "/api/jobs/j_6be15c896bfd/markdown", "archive_url": "/api/jobs/j_6be15c896bfd/archive"}
+

@@ -1,0 +1,7 @@
+{
+  "name": "unlimited-ocr-frontend-tests",
+  "private": true,
+  "type": "module",
+  "main": "replay.test.mjs",
+  "description": "main 필드는 `node --test frontend/tests/` 디렉터리 호출이 동작하게 하기 위한 것 (Node 22의 --test 인자는 글롭이라 디렉터리를 직접 확장하지 않음)."
+}
