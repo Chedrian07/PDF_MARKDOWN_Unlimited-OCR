@@ -65,6 +65,7 @@ const state = {
   boxPage: 1,          // page the stream is currently parsing (boxes attach here)
   viewPage: 1,         // page shown in the left pane
   followLive: true,
+  ocrSeen: false,      // true once an OCR-phase progress event arrived for this job
   totalPages: 0,
   pageBoxes: new Map(), // pageNo -> [{label,x1,y1,x2,y2}]
   imgFailed: false,
@@ -554,10 +555,15 @@ function renderJob(job) {
     const p = job.progress || {};
     const total = Number(p.total_pages) || 0;
     if (total > state.totalPages) state.totalPages = total;
-    const cur = Number(p.current_page) || 0;
-    if (cur > state.boxPage) {
-      state.boxPage = state.totalPages ? Math.min(cur, state.totalPages) : cur;
-      if (state.followLive) state.viewPage = state.boxPage;
+    // Same phase gate as applyProgress: only an OCR-phase snapshot may seed
+    // the box page (job opened mid-OCR); render/merge snapshots must not pin.
+    if (p.phase === 'ocr') {
+      state.ocrSeen = true;
+      const cur = Number(p.current_page) || 0;
+      if (cur > state.boxPage) {
+        state.boxPage = state.totalPages ? Math.min(cur, state.totalPages) : cur;
+        if (state.followLive) state.viewPage = state.boxPage;
+      }
     }
     updateLeftPane();
   }
@@ -627,8 +633,24 @@ function applyProgress(d) {
   // drain parsed-but-buffered grounding events before adopting a page bump,
   // so buffered boxes stay attributed to their own page
   processGroundBuf(false);
-  const cur = Number(d.current_page) || 0;
-  if (cur > state.boxPage) bumpBoxPageTo(cur); // per_page mode / chunk boundaries (no <PAGE> marker)
+  // Only OCR-phase progress may advance the box page. The render phase emits
+  // current_page=1..N in quick succession while rasterizing (before any token
+  // exists), and merge walks the pages again after OCR — adopting either would
+  // pin boxPage at N and pile every box onto the last page.
+  if (d.phase === 'ocr') {
+    if (!state.ocrSeen) {
+      state.ocrSeen = true;
+      // stale pre-OCR advancement (e.g. rerun leftovers): restart box tracking
+      if (state.boxPage !== 1 || state.pageBoxes.size > 0) {
+        state.boxPage = 1;
+        state.pageBoxes = new Map();
+        if (state.followLive) state.viewPage = 1;
+        updateLeftPane();
+      }
+    }
+    const cur = Number(d.current_page) || 0;
+    if (cur > state.boxPage) bumpBoxPageTo(cur); // per_page mode / chunk boundaries (no <PAGE> marker)
+  }
   retryPageImageIfNeeded();
 }
 
@@ -651,6 +673,7 @@ function resetLiveState() {
   state.boxPage = 1;
   state.viewPage = 1;
   state.followLive = true;
+  state.ocrSeen = false;
   state.totalPages = 0;
   state.pageBoxes = new Map();
   state.imgFailed = false;

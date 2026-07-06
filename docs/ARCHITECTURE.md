@@ -172,6 +172,9 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - 접속 시 현재 상태 스냅샷(progress) 1회 즉시 발행, 종료 잡이면 done/error 즉시 발행
 - 이벤트:
   - `event: progress` `data: {"phase":"ocr","current_page":3,"total_pages":12,"chunk":1,"total_chunks":2,"status":"running"}`
+    — `current_page`의 의미는 phase에 따라 다름: `render`=래스터화된 페이지 수,
+    `ocr`=파싱 중 페이지(청크 시작 시 점프, `<PAGE>` 마커마다 증가), `merge`=총 페이지.
+    **레이아웃 박스의 페이지 추적은 반드시 `phase==="ocr"`인 이벤트만 사용할 것**
   - `event: token`    `data: {"text":"델타 텍스트"}`   ← 모델 생성 토큰 실시간 (GIF 스타일)
   - `event: done`     `data: {"markdown_url":"...","archive_url":"..."}`
   - `event: error`    `data: {"message":"..."}`  (취소 시 `"canceled": true` 포함)
