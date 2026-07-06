@@ -95,6 +95,14 @@ PDF 업로드 → pymupdf로 페이지 PNG 렌더(기본 200dpi)
 - `per_page` 모드(요청 옵션)는 페이지별 gundam 프리셋(1024/640/crop)으로 처리합니다.
 - C++ 모듈(`native/`)은 토큰 생성 핫패스(no-repeat-ngram)를 가속합니다.
   없으면 순수 파이썬 폴백으로 동일하게 동작합니다.
+- no-repeat-ngram 검사는 디바이스별 최적 경로를 탑니다: CUDA/MPS는 **GPU 상주
+  torch 구현**(토큰마다 발생하던 시퀀스 D2H 복사·동기화 제거), CPU는 마지막
+  window 토큰만 슬라이스해 C++/파이썬으로 스캔 — 세 구현 모두 레퍼런스와
+  패리티 테스트로 검증됩니다. 참고: batch=1 자기회귀 디코드 특성상 GPU
+  사용률은 원래 낮습니다(HF generate 루프가 지배) — 대량 처리 스루풋이
+  필요하면 모델이 공식 지원하는 vLLM/SGLang 서빙을 고려하세요.
+- CPU 스레드 수는 `OCR_CPU_THREADS`, CUDA GPU 선택은 `GPU_DEVICE`(compose)로
+  제어합니다.
 
 ## 디바이스 백엔드 현황
 

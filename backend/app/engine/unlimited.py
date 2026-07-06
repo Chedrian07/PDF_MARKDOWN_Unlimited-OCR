@@ -121,6 +121,14 @@ class UnlimitedEngine(OCREngine):
                      "(backend에서 `uv sync --extra metal`). Docker/Linux에서는 Metal을 쓸 수 없습니다."
             )
             raise EngineError(f"OCR_DEVICE=metal 이지만 MPS를 사용할 수 없습니다. {hint}")
+        if self.device == "cuda":
+            # SAM/CLIP 프리필은 고정 크기 conv — cudnn 오토튠 이득. tf32는 잔여 fp32 matmul용
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        elif self.device == "cpu" and s.cpu_threads > 0:
+            torch.set_num_threads(s.cpu_threads)
+            logger.info("torch CPU 스레드: %d", s.cpu_threads)
         dtype = _resolve_dtype(self.device, s.dtype)
         self.dtype_name = str(dtype).replace("torch.", "")
         logger.info("모델 로딩 시작: %s@%s (device=%s/%s dtype=%s)",
@@ -184,9 +192,9 @@ class UnlimitedEngine(OCREngine):
             "streamer": _SinkStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False),
             "stopping_criteria": StoppingCriteriaList([_CancelCriteria()]),
         }
-        native_lp = make_ngram_logits_processor(NGRAM_SIZE, ngram_window)
-        if native_lp is not None:
-            extras["logits_processor"] = native_lp
+        extras["logits_processor"] = make_ngram_logits_processor(
+            NGRAM_SIZE, ngram_window, self.torch_device
+        )
         return extras
 
     # ── OCREngine 구현 ─────────────────────────────────────────
