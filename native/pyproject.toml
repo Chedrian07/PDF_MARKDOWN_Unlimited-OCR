@@ -1,0 +1,25 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12", "ninja>=1.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "uocr-native"
+version = "0.1.0"
+description = "C++ native acceleration (no-repeat-ngram banning + figure cropping) for the Unlimited-OCR PDF -> Markdown service"
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+test = ["pytest", "numpy"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.build-type = "Release"
+cmake.version = ">=3.15"
+# Persist build artifacts under native/build/ (git-ignored) to speed up
+# reconfiguration. (Auto-rebuild-on-import is intentionally off: it would bake
+# in a path to ninja from the temporary isolated build env, which is cleaned up
+# after install. Re-run `uv pip install -e .` after editing C++ sources.)
+build-dir = "build/{wheel_tag}"

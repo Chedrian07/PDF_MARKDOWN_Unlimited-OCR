@@ -1,0 +1,60 @@
+[project]
+name = "unlimited-ocr-web"
+version = "0.1.0"
+description = "PDF → Markdown 변환 웹 서비스 (baidu/Unlimited-OCR)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # ── 웹 ──
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "markdown-it-py>=3.0",
+    # ── 모델 (baidu/Unlimited-OCR README 고정 버전) ──
+    "transformers==4.57.1",
+    "pillow==12.1.1",
+    "einops==0.8.2",
+    "addict==2.4.0",
+    "easydict==1.13",
+    "pymupdf==1.27.2.2",
+    "tqdm>=4.66",
+    "requests>=2.32",
+    "numpy>=1.26",
+    "safetensors>=0.4",
+    "huggingface-hub>=0.34",
+]
+
+# torch는 디바이스 백엔드별 인덱스가 달라 extra로 분리 (docker build ARG로 선택)
+[project.optional-dependencies]
+cpu = ["torch==2.10.0", "torchvision==0.25.0"]
+cu129 = ["torch==2.10.0", "torchvision==0.25.0"]
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "cu129" }]]
+package = false
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu129", extra = "cu129" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu129", extra = "cu129" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

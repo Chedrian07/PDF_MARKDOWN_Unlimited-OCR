@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Unlimited-OCR — PDF → Markdown</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script>
+    /* Theme bootstrap: resolve before first paint to avoid a flash.
+       Follows prefers-color-scheme unless the user picked a theme (localStorage). */
+    (function () {
+      try {
+        var t = localStorage.getItem('uocr-theme');
+        if (t !== 'light' && t !== 'dark') {
+          t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'light');
+      }
+    })();
+  </script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-left">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
+          <path d="M14 3v5h5"/>
+          <path d="M9 13h6M9 17h4"/>
+        </svg>
+      </span>
+      <h1 class="app-title">Unlimited-OCR <span class="title-sep" aria-hidden="true">—</span> <span class="title-sub">PDF → Markdown</span></h1>
+    </div>
+    <div class="header-right">
+      <div id="health-badges" class="badges" aria-live="polite" aria-label="서버 상태"></div>
+      <button id="theme-toggle" class="icon-btn" type="button" aria-label="테마 전환"></button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" aria-label="업로드 및 작업 목록">
+      <!-- Upload -->
+      <section class="panel">
+        <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="PDF 파일을 선택하거나 여기에 드래그하세요">
+          <span class="dz-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <path d="M17 8l-5-5-5 5"/>
+              <path d="M12 3v12"/>
+            </svg>
+          </span>
+          <p class="dz-title">PDF를 여기에 드래그</p>
+          <p class="dz-sub">또는 클릭하여 파일 선택</p>
+          <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+        </div>
+
+        <div id="file-info" class="file-info" hidden>
+          <span class="fi-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
+              <path d="M14 3v5h5"/>
+            </svg>
+          </span>
+          <span class="fi-meta">
+            <span id="file-name" class="fi-name"></span>
+            <span id="file-size" class="fi-size muted"></span>
+          </span>
+          <button id="file-clear" class="icon-btn-sm" type="button" aria-label="선택 취소" title="선택 취소"></button>
+        </div>
+
+        <div id="upload-error" class="inline-error" role="alert" hidden></div>
+
+        <button id="upload-btn" class="btn btn-primary btn-block" type="button" disabled>변환 시작</button>
+      </section>
+
+      <!-- Options -->
+      <details class="panel options">
+        <summary class="options-summary">
+          <span>고급 옵션</span>
+          <span class="chev" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+          </span>
+        </summary>
+        <div class="options-body">
+          <fieldset class="field-group">
+            <legend>변환 모드</legend>
+            <label class="radio">
+              <input type="radio" name="mode" value="multi" checked>
+              <span class="radio-text">멀티페이지 <span class="muted">(기본, 문서 전체 문맥)</span></span>
+            </label>
+            <label class="radio">
+              <input type="radio" name="mode" value="per_page">
+              <span class="radio-text">페이지별 <span class="muted">(페이지 단위 처리)</span></span>
+            </label>
+          </fieldset>
+          <div class="field">
+            <label for="dpi-input">렌더링 DPI</label>
+            <input id="dpi-input" type="number" min="72" max="400" step="1" value="200" inputmode="numeric">
+            <span class="field-hint muted">72–400 (기본 200)</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- History -->
+      <section class="panel history">
+        <div class="panel-head">
+          <h2>변환 기록</h2>
+        </div>
+        <ul id="job-list" class="job-list" aria-label="변환 작업 목록"></ul>
+        <p id="job-list-empty" class="empty-note">아직 변환 기록이 없습니다.</p>
+      </section>
+    </aside>
+
+    <main class="main" aria-label="작업 상세">
+      <!-- Empty state -->
+      <div id="empty-state" class="empty-state">
+        <span class="es-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
+            <path d="M14 3v5h5"/>
+            <path d="M9 13h6M9 17h4"/>
+          </svg>
+        </span>
+        <h2>PDF를 Markdown으로 변환하세요</h2>
+        <p class="es-desc">업로드한 PDF를 <strong>baidu/Unlimited-OCR</strong> 비전-언어 모델이 분석하여, 표와 그림(figure)까지 포함된 Markdown으로 변환합니다. 변환 과정은 아래에서 토큰 단위로 실시간 스트리밍됩니다.</p>
+        <ul class="es-features">
+          <li>
+            <span class="esf-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 10-12h-7z"/></svg></span>
+            <span><strong>실시간 스트리밍</strong> — 모델이 생성하는 텍스트를 그대로 지켜보기</span>
+          </li>
+          <li>
+            <span class="esf-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></span>
+            <span><strong>그림 자동 추출</strong> — 문서 속 figure를 잘라 이미지로 저장</span>
+          </li>
+          <li>
+            <span class="esf-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg></span>
+            <span><strong>레이아웃 시각화</strong> — 페이지별 검출 박스 오버레이 확인</span>
+          </li>
+        </ul>
+        <p class="es-hint">왼쪽에서 PDF를 끌어다 놓거나 선택해 시작하세요.</p>
+      </div>
+
+      <!-- Active job -->
+      <div id="job-view" class="job-view" hidden>
+        <div class="job-head">
+          <div class="job-head-info">
+            <span id="job-status-chip" class="chip"></span>
+            <h2 id="job-filename" class="job-filename"></h2>
+            <span id="job-time" class="muted"></span>
+          </div>
+          <div class="job-head-actions">
+            <button id="job-stop" class="btn btn-stop" type="button" hidden>
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+              <span id="job-stop-label">정지</span>
+            </button>
+            <button id="job-delete" class="btn btn-ghost btn-danger-ghost" type="button">삭제</button>
+          </div>
+        </div>
+
+        <!-- Progress -->
+        <section id="progress-section" class="progress-section" aria-live="polite" hidden>
+          <div class="progress-head">
+            <span class="progress-phase-wrap">
+              <span id="progress-spinner" class="spinner" aria-hidden="true" hidden></span>
+              <span id="progress-phase" class="progress-phase">대기 중</span>
+            </span>
+            <span id="progress-count" class="progress-count muted"></span>
+          </div>
+          <div id="progress-track" class="progress-track">
+            <div id="progress-fill" class="progress-fill"></div>
+          </div>
+          <div id="progress-chunk" class="progress-chunk muted"></div>
+        </section>
+
+        <!-- Live 3-pane view -->
+        <details id="live-details" class="live-details" open>
+          <summary class="live-summary">
+            <span class="stream-dot" aria-hidden="true"></span>
+            <span>라이브 진행</span>
+            <span class="ls-hint muted">원본 · RAW · 미리보기</span>
+          </summary>
+          <div class="live-grid">
+            <section class="live-pane pane-source" aria-label="원본 페이지와 레이아웃 박스">
+              <div class="lp-head">원본 + 레이아웃</div>
+              <div class="lp-body lp-body-source">
+                <div class="page-card">
+                  <div class="page-wrap">
+                    <img id="page-img" alt="현재 페이지 이미지" hidden>
+                    <div id="box-overlay" class="box-overlay" aria-hidden="true"></div>
+                  </div>
+                  <p id="page-note" class="page-note">페이지 이미지 대기 중…</p>
+                </div>
+              </div>
+              <div class="lp-foot">
+                <button id="pager-prev" class="pager-btn" type="button" aria-label="이전 페이지" disabled>‹</button>
+                <span id="pager-label" class="pager-label">– / –</span>
+                <button id="pager-next" class="pager-btn" type="button" aria-label="다음 페이지" disabled>›</button>
+                <button id="follow-chip" class="chip-btn" type="button" hidden>최신 페이지로</button>
+              </div>
+            </section>
+            <section class="live-pane pane-raw" aria-label="모델 원시 출력 스트림">
+              <div class="lp-head">RAW OUTPUT</div>
+              <div id="stream-pane" class="lp-body stream-pane" role="log" aria-live="off" aria-label="모델 출력 실시간 스트림"></div>
+            </section>
+            <section class="live-pane pane-preview" aria-label="실시간 마크다운 미리보기">
+              <div class="lp-head">실시간 미리보기</div>
+              <div id="live-preview" class="lp-body live-preview markdown-body"></div>
+            </section>
+          </div>
+        </details>
+
+        <!-- Error -->
+        <section id="error-section" class="error-section" role="alert" hidden>
+          <span class="error-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.01"/></svg>
+          </span>
+          <div class="error-body">
+            <p id="error-title" class="error-title">오류</p>
+            <p id="error-message" class="error-message"></p>
+            <p id="error-hint" class="error-hint"></p>
+          </div>
+        </section>
+
+        <!-- Result -->
+        <section id="result-section" class="result-section" hidden>
+          <div class="result-actions">
+            <a id="dl-md" class="btn btn-primary" download>Markdown 다운로드</a>
+            <a id="dl-zip" class="btn btn-secondary" download>ZIP 다운로드 (이미지 포함)</a>
+          </div>
+
+          <div class="tabs" role="tablist" aria-label="결과 보기">
+            <button class="tab active" role="tab" type="button" data-tab="preview" aria-selected="true">미리보기</button>
+            <button class="tab" role="tab" type="button" data-tab="markdown" aria-selected="false" tabindex="-1">Markdown</button>
+            <button class="tab" role="tab" type="button" data-tab="layouts" aria-selected="false" tabindex="-1">레이아웃</button>
+            <button class="tab" role="tab" type="button" data-tab="pages" aria-selected="false" tabindex="-1">원본 페이지</button>
+          </div>
+
+          <div class="tab-panels">
+            <div class="tab-panel" role="tabpanel" data-panel="preview">
+              <div id="preview-body" class="markdown-body"></div>
+            </div>
+            <div class="tab-panel" role="tabpanel" data-panel="markdown" hidden>
+              <div class="raw-toolbar">
+                <button id="copy-md" class="btn btn-small" type="button">복사</button>
+              </div>
+              <pre class="code-block md-raw"><code id="md-code"></code></pre>
+            </div>
+            <div class="tab-panel" role="tabpanel" data-panel="layouts" hidden>
+              <div id="layouts-grid" class="thumb-grid"></div>
+            </div>
+            <div class="tab-panel" role="tabpanel" data-panel="pages" hidden>
+              <div id="pages-grid" class="thumb-grid"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

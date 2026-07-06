@@ -1,0 +1,66 @@
+# Unlimited-OCR — PDF → Markdown
+#
+#   CPU (기본):  docker compose up -d --build          → http://localhost:8000
+#   CUDA:        docker compose --profile cuda up -d --build ocr-cuda
+#                                                       → http://localhost:8001
+#
+# 기본 프로필은 .env의 COMPOSE_PROFILES=cpu 로 지정된다.
+# 모델 가중치(~6.7GB)는 최초 실행 시 hf-cache 볼륨에 1회 다운로드된다.
+
+services:
+  ocr-cpu:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        TORCH_VARIANT: cpu
+    image: unlimited-ocr-web:cpu
+    profiles: ["cpu"]
+    ports:
+      - "8000:8000"
+    environment:
+      OCR_DEVICE: cpu
+      OCR_DTYPE: ${OCR_DTYPE:-auto}
+      OCR_ENGINE: ${OCR_ENGINE:-unlimited}
+      MODEL_ID: ${MODEL_ID:-baidu/Unlimited-OCR}
+      PRELOAD_MODEL: ${PRELOAD_MODEL:-1}
+      PAGES_PER_CHUNK: ${PAGES_PER_CHUNK:-8}
+      RENDER_DPI: ${RENDER_DPI:-200}
+      MAX_PAGES: ${MAX_PAGES:-200}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ocr-data:/data
+      - hf-cache:/data/hf
+    restart: unless-stopped
+
+  ocr-cuda:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        TORCH_VARIANT: cu129
+    image: unlimited-ocr-web:cuda
+    profiles: ["cuda"]
+    gpus: all
+    ports:
+      - "8001:8000"
+    environment:
+      OCR_DEVICE: cuda
+      OCR_DTYPE: ${OCR_DTYPE:-auto}
+      OCR_ENGINE: ${OCR_ENGINE:-unlimited}
+      MODEL_ID: ${MODEL_ID:-baidu/Unlimited-OCR}
+      PRELOAD_MODEL: ${PRELOAD_MODEL:-1}
+      PAGES_PER_CHUNK: ${PAGES_PER_CHUNK:-8}
+      RENDER_DPI: ${RENDER_DPI:-200}
+      MAX_PAGES: ${MAX_PAGES:-200}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ocr-data:/data
+      - hf-cache:/data/hf
+    restart: unless-stopped
+
+volumes:
+  ocr-data:
+  hf-cache:

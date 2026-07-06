@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# Native build
+native/_skbuild/
+native/build/
+*.so
+
+# Data / runtime
+data/
+*.log
+sample/e2e-*/
+nohup.out
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# HF cache (로컬 개발 시)
+hf-cache/

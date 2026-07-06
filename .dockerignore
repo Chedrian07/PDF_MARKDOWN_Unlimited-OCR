@@ -1,0 +1,14 @@
+.git/
+.gitignore
+docs/
+data/
+hf-cache/
+**/__pycache__/
+**/.venv/
+**/.pytest_cache/
+**/dist/
+**/build/
+**/_skbuild/
+*.log
+.env
+.env.example
