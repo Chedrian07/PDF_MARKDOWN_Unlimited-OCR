@@ -208,6 +208,15 @@ class UnlimitedEngine(OCREngine):
         extras["logits_processor"] = make_ngram_logits_processor(
             NGRAM_SIZE, ngram_window, self.torch_device
         )
+        if self._settings.fast_decode:
+            from .fast_decode import fast_greedy_decode
+
+            block = self._settings.decode_block
+
+            def _generate_fn(model, gen_kwargs):
+                return fast_greedy_decode(model, gen_kwargs, block=block)
+
+            extras["generate_fn"] = _generate_fn
         return extras
 
     # ── OCREngine 구현 ─────────────────────────────────────────

@@ -837,7 +837,7 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
 
 
 
-    def infer(self, tokenizer, prompt='', image_file='', output_path = '', base_size=1024, image_size=640, crop_mode=True, test_compress=False, save_results=False, eval_mode=False, max_length=32768, tps_interval=0, no_repeat_ngram_size=0, ngram_window=0, temperature=0.0, streamer=None, stopping_criteria=None, logits_processor=None):
+    def infer(self, tokenizer, prompt='', image_file='', output_path = '', base_size=1024, image_size=640, crop_mode=True, test_compress=False, save_results=False, eval_mode=False, max_length=32768, tps_interval=0, no_repeat_ngram_size=0, ngram_window=0, temperature=0.0, streamer=None, stopping_criteria=None, logits_processor=None, generate_fn=None):
         self.disable_torch_init()
         _dev = next(self.parameters()).device  # [vendor patch P4]
         _model_dtype = next(self.parameters()).dtype
@@ -1077,7 +1077,7 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
                 gen_kwargs['stopping_criteria'] = stopping_criteria
             with _autocast_ctx(_dev, _model_dtype):
                 with torch.no_grad():
-                    output_ids = self.generate(**gen_kwargs)
+                    output_ids = generate_fn(self, gen_kwargs) if generate_fn is not None else self.generate(**gen_kwargs)  # [vendor patch P15]
             self.config.sliding_window = _orig_sw
 
         else:
@@ -1105,7 +1105,7 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
                 gen_kwargs['stopping_criteria'] = stopping_criteria
             with _autocast_ctx(_dev, _model_dtype):
                 with torch.no_grad():
-                    output_ids = self.generate(**gen_kwargs)
+                    output_ids = generate_fn(self, gen_kwargs) if generate_fn is not None else self.generate(**gen_kwargs)  # [vendor patch P15]
             self.config.sliding_window = _orig_sw
                 
 
@@ -1203,7 +1203,7 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
             return outputs  # [vendor patch P7]
 
 
-    def infer_multi(self, tokenizer, prompt='', image_files=None, output_path='', image_size=640, save_results=False, max_length=32768, tps_interval=0, no_repeat_ngram_size=0, ngram_window=0, temperature=0.0, streamer=None, stopping_criteria=None, logits_processor=None):
+    def infer_multi(self, tokenizer, prompt='', image_files=None, output_path='', image_size=640, save_results=False, max_length=32768, tps_interval=0, no_repeat_ngram_size=0, ngram_window=0, temperature=0.0, streamer=None, stopping_criteria=None, logits_processor=None, generate_fn=None):
         """
         Multi-image inference. Does NOT support crop mode.
         Prompt uses a single <image> token (e.g. "<image>Multi page parsing.").
@@ -1327,7 +1327,7 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
                     gen_kwargs['no_repeat_ngram_size'] = no_repeat_ngram_size
                 if stopping_criteria is not None:  # [vendor patch P3]
                     gen_kwargs['stopping_criteria'] = stopping_criteria
-                output_ids = self.generate(**gen_kwargs)
+                output_ids = generate_fn(self, gen_kwargs) if generate_fn is not None else self.generate(**gen_kwargs)  # [vendor patch P15]
         self.config.sliding_window = _orig_sw  # Restore
 
         outputs = tokenizer.decode(output_ids[0, input_ids.shape[0]:])

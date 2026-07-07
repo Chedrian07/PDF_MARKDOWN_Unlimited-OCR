@@ -31,6 +31,8 @@ services:
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
       HF_TOKEN: ${HF_TOKEN:-}
       OCR_CPU_THREADS: ${OCR_CPU_THREADS:-0}
+      OCR_FAST_DECODE: ${OCR_FAST_DECODE:-1}
+      OCR_DECODE_BLOCK: ${OCR_DECODE_BLOCK:-8}
     volumes:
       - ocr-data:/data
       - hf-cache:/data/hf
@@ -61,6 +63,8 @@ services:
       # GPU_DEVICE=1 로 두 번째 GPU 선택 가능 (기본 0)
       CUDA_VISIBLE_DEVICES: ${GPU_DEVICE:-0}
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      OCR_FAST_DECODE: ${OCR_FAST_DECODE:-1}
+      OCR_DECODE_BLOCK: ${OCR_DECODE_BLOCK:-8}
     volumes:
       - ocr-data:/data
       - hf-cache:/data/hf

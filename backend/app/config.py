@@ -38,6 +38,8 @@ class Settings:
     max_length: int = 32768
     page_separator: str = "\n\n---\n\n"
     cpu_threads: int = 0                # 0=torch 기본값 (CPU 백엔드 전용)
+    fast_decode: bool = True            # 커스텀 그리디 디코드 루프 (0이면 HF generate 폴백)
+    decode_block: int = 8               # fast_decode의 호스트 동기화 배칭 크기(토큰)
     fake_delay: float = 0.02            # FakeEngine 페이지당 지연(초)
 
     @classmethod
@@ -61,6 +63,8 @@ class Settings:
             max_length=_env_int("MAX_LENGTH", 32768),
             page_separator=sep.encode().decode("unicode_escape") if sep else "\n\n---\n\n",
             cpu_threads=_env_int("OCR_CPU_THREADS", 0),
+            fast_decode=_env_bool("OCR_FAST_DECODE", True),
+            decode_block=_env_int("OCR_DECODE_BLOCK", 8),
             fake_delay=float(os.environ.get("FAKE_DELAY", "0.02")),
         )
 
