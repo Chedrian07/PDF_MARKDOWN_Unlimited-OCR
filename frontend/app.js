@@ -1141,6 +1141,7 @@ async function runPreviewRender() {
   if (html != null && state.currentJobId === id && state.liveGen === gen) {
     // Trusted server-rendered fragment (same renderer as /html).
     el.livePreview.innerHTML = html;
+    typesetMath(el.livePreview);
     if (state.previewAutoScroll) el.livePreview.scrollTop = el.livePreview.scrollHeight;
   }
   maybeReschedulePreview();
@@ -1149,6 +1150,25 @@ async function runPreviewRender() {
 function onPreviewScroll() {
   const pane = el.livePreview;
   state.previewAutoScroll = (pane.scrollHeight - pane.scrollTop - pane.clientHeight) < 24;
+}
+
+/* ── KaTeX 타이포셋 (로컬 벤더 — vendor/katex) ────────────────────────── */
+// 서버 렌더러(render.py)가 tex를 이스케이프해 .math-inline/.math-display로
+// 내보낸다. KaTeX 미로드(자산 누락 등) 시에는 raw LaTeX 텍스트가 그대로
+// 보이는 그레이스풀 폴백.
+function typesetMath(root) {
+  if (!window.katex || !root) return;
+  root.querySelectorAll('.math-inline, .math-display').forEach((elm) => {
+    if (elm.dataset.mathDone) return;
+    const tex = elm.textContent;
+    try {
+      window.katex.render(tex, elm, {
+        displayMode: elm.classList.contains('math-display'),
+        throwOnError: false,
+      });
+      elm.dataset.mathDone = '1';
+    } catch (_) { /* 렌더 불가 tex는 원문 유지 */ }
+  });
 }
 
 /* ============================ Cancel (STOP) ============================ */
@@ -1478,6 +1498,7 @@ async function loadPreview() {
   state.previewLoaded = true;
   // Trusted server-rendered fragment (/html, same renderer as /render-preview).
   el.previewBody.innerHTML = html;
+  typesetMath(el.previewBody);
 }
 
 async function loadMarkdown() {

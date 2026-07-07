@@ -42,6 +42,43 @@ def test_markdown_html_rewrite_and_escape():
     assert "&lt;script&gt;" in html
 
 
+def test_math_inline_normalized():
+    md = "질량은 \\( E = mc^{2} \\) 이고 인용은 \\( [10, 30, 33] \\) 형태다."
+    html = render_markdown_html(md, "/b")
+    assert '<span class="math-inline">E = mc^{2}</span>' in html
+    assert '<span class="math-inline">[10, 30, 33]</span>' in html
+    assert "\\(" not in html
+
+
+def test_math_display_multiline():
+    md = "앞 문장.\n\n\\[\nx = \\frac{a}{b}, \\quad y_i^2\n\\]\n\n뒤 문장."
+    html = render_markdown_html(md, "/b")
+    assert '<div class="math-display">' in html
+    assert "x = \\frac{a}{b}, \\quad y_i^2" in html
+    # dollarmath가 emphasis/서브스크립트 오염을 막는다 — _, ^ 가 태그로 변하지 않음
+    assert "<em>" not in html
+
+
+def test_math_untouched_inside_code():
+    md = "```\n\\( raw \\) 코드\n```\n\n그리고 `\\( inline \\)` 코드 스팬."
+    html = render_markdown_html(md, "/b")
+    assert "math-inline" not in html
+    assert "\\( raw \\)" in html
+
+
+def test_math_xss_escaped():
+    html = render_markdown_html("\\( <script>alert(1)</script> \\)", "/b")
+    assert "math-inline" in html
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_currency_dollars_not_math():
+    html = render_markdown_html("가격은 $5 그리고 $10 입니다.", "/b")
+    assert "math-inline" not in html
+    assert "$5" in html and "$10" in html
+
+
 def test_model_html_tables_restored_safely():
     # Unlimited-OCR 실출력 형태: HTML 표 + 잠재적 악성 태그 혼재
     md = ('<table><tr><td>Mode</td><td colspan="2">base</td></tr></table>\n\n'

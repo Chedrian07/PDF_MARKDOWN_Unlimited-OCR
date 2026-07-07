@@ -21,6 +21,7 @@ dependencies = [
     "numpy>=1.26",
     "safetensors>=0.4",
     "huggingface-hub>=0.34",
+    "mdit-py-plugins>=0.4",
 ]
 
 # torch는 디바이스 백엔드별 인덱스가 달라 extra로 분리 (docker build ARG로 선택)

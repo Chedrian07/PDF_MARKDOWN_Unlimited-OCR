@@ -93,6 +93,10 @@ PDF 업로드 → pymupdf로 페이지 PNG 렌더(기본 200dpi)
   CPU 지원 패치 + `eval()` 보안 패치를 적용했습니다 — 내역:
   [PROVENANCE.md](backend/app/vendor/unlimited_ocr/PROVENANCE.md)
 - `per_page` 모드(요청 옵션)는 페이지별 gundam 프리셋(1024/640/crop)으로 처리합니다.
+- **수식 렌더링**: 모델의 `\(…\)`/`\[…\]` LaTeX를 렌더 레이어에서 정규화해
+  (mdit-py-plugins dollarmath) 로컬 벤더링된 **KaTeX**(`frontend/vendor/katex/`,
+  외부 CDN 없음)로 타이포셋합니다. 다운로드되는 `result.md`에는 원본 LaTeX가
+  그대로 유지됩니다.
 - C++ 모듈(`native/`)은 토큰 생성 핫패스(no-repeat-ngram)를 가속합니다.
   없으면 순수 파이썬 폴백으로 동일하게 동작합니다.
 - no-repeat-ngram 검사는 디바이스별 최적 경로를 탑니다: CUDA/MPS는 **GPU 상주
