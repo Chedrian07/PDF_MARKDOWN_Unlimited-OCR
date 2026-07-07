@@ -48,6 +48,17 @@ def load_image(image_path):
             return None
 
 
+def _dump_raw_pages(output_path, pages):
+    """[vendor patch P14] 치환 전 페이지 원문(그라운딩 태그 포함)을 raw_pages.json으로
+    남긴다 — 좌표 기반 레이아웃 뷰(app/pipeline/layout.py)가 사용. 마크다운 계약 불변."""
+    import json as _json
+    try:
+        with open(f"{output_path}/raw_pages.json", "w", encoding="utf-8") as _f:
+            _json.dump({"pages": list(pages)}, _f, ensure_ascii=False)
+    except Exception as _e:  # 레이아웃은 부가 기능 — 실패해도 본 파이프라인은 계속
+        print(_e)
+
+
 def _autocast_ctx(device, dtype):
     """[vendor patch P1] device-aware replacement for hardcoded torch.autocast("cuda", bf16)."""
     if device.type == "mps":
@@ -1130,6 +1141,7 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
                 outputs = outputs[:-len(stop_str)]
             outputs = outputs.strip()
 
+            _dump_raw_pages(output_path, [outputs])  # [vendor patch P14]
             matches_ref, matches_images, mathes_other = re_match(outputs)
             # print(matches_ref)
             result = process_image_with_refs(image_draw, matches_ref, output_path)
@@ -1329,6 +1341,7 @@ class UnlimitedOCRForCausalLM(DeepseekV2ForCausalLM, GenerationMixin):  # [vendo
         if save_results:
             print('=' * 15 + 'save results:' + '=' * 15)
             pages = outputs.split('<PAGE>')[1:]
+            _dump_raw_pages(output_path, [p.strip() for p in pages])  # [vendor patch P14]
             processed_pages = []
             for page_idx, page_output in enumerate(pages):
                 page_output = page_output.strip()

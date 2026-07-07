@@ -913,3 +913,35 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 }
 .markdown-body table { margin: 14px 0; }
 .markdown-body img { border-radius: 4px; }
+
+/* ── 좌표 레이아웃 뷰 (Phase B — /jobs/{id}/layout) ──────────────────── */
+/* 웹 폰트가 원본과 달라 텍스트가 박스를 넘치거나 남을 수 있는 best-effort
+   재현 — overflow:hidden 처리. 정확한 텍스트는 마크다운 뷰 참조. */
+.doclayout-body { display: grid; gap: 22px; }
+.layout-page { position: relative; max-width: 860px; width: 100%; margin-inline: auto; }
+.layout-page::before {
+  content: "페이지 " attr(data-page);
+  display: block;
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.5;
+  margin-bottom: 4px;
+}
+.layout-canvas {
+  position: relative;
+  width: 100%;
+  height: 0;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+.layout-block { position: absolute; overflow: hidden; font-size: 11px; line-height: 1.35; color: #1a1c22; padding: 1px 3px; }
+.layout-title { font-weight: 700; font-size: 14px; color: #b0262c; }
+.layout-image { object-fit: contain; padding: 0; }
+.layout-table { font-size: 9px; }
+.layout-table table { border-collapse: collapse; width: 100%; }
+.layout-table td, .layout-table th { border: 1px solid #c9c9d4; padding: 1px 3px; color: #1a1c22; }
+.layout-formula, .layout-equation { font-family: var(--mono); font-size: 10px; color: #8a5200; }
+.layout-page_number, .layout-header, .layout-footer, .layout-footnote { opacity: 0.45; font-size: 9px; }

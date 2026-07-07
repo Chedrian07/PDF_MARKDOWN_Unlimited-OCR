@@ -72,9 +72,17 @@ class FakeEngine(OCREngine):
         }
         p.write_text(json.dumps(data), encoding="utf-8")
 
+    def _write_raw_pages(self, out_dir: Path, raw_pages: list[str]) -> None:
+        """벤더 P14의 raw_pages.json 계약 재현 (레이아웃 뷰 E2E용)."""
+        import json
+
+        (out_dir / "raw_pages.json").write_text(
+            json.dumps({"pages": raw_pages}, ensure_ascii=False), encoding="utf-8"
+        )
+
     def _fake_page(
         self, image_path: Path, out_dir: Path, page_idx: int, img_name: str, overlay_name: str
-    ) -> str:
+    ) -> tuple[str, str]:
         with Image.open(image_path) as im:
             im = im.convert("RGB")
             w, h = im.size
@@ -84,7 +92,17 @@ class FakeEngine(OCREngine):
             overlay = im.copy()
             ImageDraw.Draw(overlay).rectangle(crop_box, outline=(220, 30, 30), width=4)
             overlay.save(out_dir / overlay_name, quality=85)
-        return _PAGE_MD.format(page=page_idx + 1, stem=image_path.stem, img_ref=img_name)
+        md = _PAGE_MD.format(page=page_idx + 1, stem=image_path.stem, img_ref=img_name)
+        nx1, ny1, nx2, ny2 = (
+            int(crop_box[0] / w * 999), int(crop_box[1] / h * 999),
+            int(crop_box[2] / w * 999), int(crop_box[3] / h * 999),
+        )
+        raw = (
+            f"<|det|>title [60, 30, 700, 80]<|/det|>페이지 {page_idx + 1} — {image_path.stem}\n"
+            f"<|det|>image [{nx1}, {ny1}, {nx2}, {ny2}]<|/det|>\n"
+            f"<|det|>text [60, 620, 930, 820]<|/det|>본문 텍스트 예시입니다. FakeEngine 레이아웃 블록."
+        )
+        return md, raw
 
     # ── OCREngine 구현 ─────────────────────────────────────────
 
@@ -97,15 +115,18 @@ class FakeEngine(OCREngine):
     ) -> str:
         (out_dir / "images").mkdir(parents=True, exist_ok=True)
         parts: list[str] = []
+        raws: list[str] = []
         for i, p in enumerate(image_paths):
             if cancel.is_set():
                 raise JobCanceled()
-            md = self._fake_page(p, out_dir, i, f"page_{i}_0.jpg", f"result_with_boxes_{i}.jpg")
+            md, raw = self._fake_page(p, out_dir, i, f"page_{i}_0.jpg", f"result_with_boxes_{i}.jpg")
             sink.on_text("<PAGE>\n")
             self._emit(sink, md)
             sink.on_text("\n")
             parts.append(md)
+            raws.append(raw)
             time.sleep(self._delay)
+        self._write_raw_pages(out_dir, raws)
         return "<PAGE>\n" + "\n<PAGE>\n".join(parts)
 
     def run_single(
@@ -118,7 +139,8 @@ class FakeEngine(OCREngine):
         if cancel.is_set():
             raise JobCanceled()
         (out_dir / "images").mkdir(parents=True, exist_ok=True)
-        md = self._fake_page(image_path, out_dir, 0, "0.jpg", "result_with_boxes.jpg")
+        md, raw = self._fake_page(image_path, out_dir, 0, "0.jpg", "result_with_boxes.jpg")
+        self._write_raw_pages(out_dir, [raw])
         self._emit(sink, md)
         time.sleep(self._delay)
         return md

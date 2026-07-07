@@ -67,6 +67,8 @@ class IncrementalMerger:
         self.warnings: list[str] = []
         # 글로벌 이미지명 → figure bbox 메타 (벤더 P13의 boxes.json — 렌더 폭 계산용)
         self.figure_boxes: dict[str, dict] = {}
+        # 레이아웃 뷰용 페이지 블록 (벤더 P14의 raw_pages.json → layout.json)
+        self.layout_pages: list[dict] = []
 
     # ── 파일 이동 ──────────────────────────────────────────────
 
@@ -119,6 +121,42 @@ class IncrementalMerger:
                 json.dumps(self.figure_boxes, ensure_ascii=False, indent=1), encoding="utf-8"
             )
 
+    # ── 레이아웃 뷰 (Phase B — 부가 산출물, 결측 시 조용히 스킵) ─────────
+
+    def _page_size(self, global_page: int) -> tuple[int, int]:
+        p = self.job_dir / "pages" / f"page_{global_page:04d}.png"
+        try:
+            from PIL import Image
+
+            with Image.open(p) as im:
+                return im.size
+        except Exception:
+            return (1000, 1414)  # A4 비율 폴백
+
+    def _ingest_layout(self, chunk: ChunkResult) -> None:
+        raw_path = chunk.chunk_dir / "raw_pages.json"
+        if not raw_path.is_file():
+            return
+        from .layout import parse_page_blocks
+
+        try:
+            raw_pages = json.loads(raw_path.read_text(encoding="utf-8"))["pages"]
+        except Exception:
+            return
+        for local, raw in enumerate(raw_pages[: chunk.num_pages]):
+            g = chunk.start_page + (0 if chunk.single else local)
+            blocks = parse_page_blocks(str(raw))
+            for b in blocks:
+                if "crop_index" in b:
+                    # 벤더 크롭 순서 == boxes/이미지 저장 순서 → 글로벌 이미지명 매핑
+                    b["image"] = _global_image_name(g, b.pop("crop_index"))
+            w, h = self._page_size(g)
+            self.layout_pages.append({"page": g, "width": w, "height": h, "blocks": blocks})
+        if self.layout_pages:
+            (self.job_dir / "layout.json").write_text(
+                json.dumps(self.layout_pages, ensure_ascii=False), encoding="utf-8"
+            )
+
     # ── 마크다운 재작성 ────────────────────────────────────────
 
     def _rewrite_refs(self, page_md: str, chunk: ChunkResult) -> str:
@@ -153,6 +191,7 @@ class IncrementalMerger:
 
         pages = [self._rewrite_refs(p, chunk) for p in pages]
         self._move_chunk_files(chunk)
+        self._ingest_layout(chunk)
         self.pages_md.extend(_clean(p) for p in pages)
         self._write_partial()
 

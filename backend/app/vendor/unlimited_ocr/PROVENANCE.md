@@ -28,5 +28,6 @@ CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
 | P11 | 이미지 임베딩 주입의 `masked_scatter_`(브로드캐스트 (L,1) 마스크) → bool 인덱싱 대입 (`inputs_embeds[idx][mask] = …`) | **MPS 정합성**: torch 2.10.0 MPS에서 브로드캐스트 마스크 `masked_scatter_`가 조용히 오동작(뷰/expand 무관, 소스 첫 원소만 기록)해 이미지 임베딩이 주입되지 않음 → 모델이 즉시 EOS 출력. CPU/CUDA는 결과 동일 (P2의 마스크 디바이스 수정 의도 포함) |
 | P12 | `_autocast_ctx`가 `mps`에서는 항상 nullcontext 반환 | **MPS 정합성**: torch 2.10.0의 `torch.autocast("mps", bf16)`가 로짓을 오염시켜 생성이 반복 루프(`"), ), "` 무한 반복)로 퇴화. 가중치를 bf16으로 로딩하므로 autocast 없이도 bf16 연산 — 성능 손실 없음. CPU/CUDA 경로 불변 |
 | P13 | `draw_bounding_boxes`가 figure 크롭 bbox(픽셀)+페이지 크기를 `{output_path}/boxes.json`으로 export | 업스트림은 크롭 후 좌표를 버림 — 렌더 레이어가 원본 페이지 대비 상대 폭으로 figure를 표시하는 데 필요 (마크다운 출력 계약 불변, 파일 추가만) |
+| P14 | `infer`/`infer_multi`의 save_results가 치환 전 페이지 원문을 `{output_path}/raw_pages.json`으로 export | 좌표 기반 레이아웃 뷰(전 블록 type/bbox/텍스트)가 필요 — 구조 파싱은 앱 코드(pipeline/layout.py)에서 수행해 벤더 변경을 dump 한 줄로 최소화 (마크다운 계약 불변) |
 
 업스트림 갱신 시: 새 revision을 받아 이 패치들을 재적용하고 이 문서를 갱신할 것.

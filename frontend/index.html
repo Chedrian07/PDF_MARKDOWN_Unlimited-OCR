@@ -235,7 +235,8 @@
           <div class="tabs" role="tablist" aria-label="결과 보기">
             <button class="tab active" role="tab" type="button" data-tab="preview" aria-selected="true">미리보기</button>
             <button class="tab" role="tab" type="button" data-tab="markdown" aria-selected="false" tabindex="-1">Markdown</button>
-            <button class="tab" role="tab" type="button" data-tab="layouts" aria-selected="false" tabindex="-1">레이아웃</button>
+            <button class="tab" role="tab" type="button" data-tab="doclayout" aria-selected="false" tabindex="-1">레이아웃</button>
+            <button class="tab" role="tab" type="button" data-tab="layouts" aria-selected="false" tabindex="-1">감지 박스</button>
             <button class="tab" role="tab" type="button" data-tab="pages" aria-selected="false" tabindex="-1">원본 페이지</button>
           </div>
 
@@ -248,6 +249,9 @@
                 <button id="copy-md" class="btn btn-small" type="button">복사</button>
               </div>
               <pre class="code-block md-raw"><code id="md-code"></code></pre>
+            </div>
+            <div class="tab-panel" role="tabpanel" data-panel="doclayout" hidden>
+              <div id="doclayout-body" class="doclayout-body"></div>
             </div>
             <div class="tab-panel" role="tabpanel" data-panel="layouts" hidden>
               <div id="layouts-grid" class="thumb-grid"></div>

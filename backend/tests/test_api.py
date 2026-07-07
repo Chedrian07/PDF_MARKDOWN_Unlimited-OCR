@@ -62,6 +62,13 @@ def test_full_flow_multi(client, sample_pdf):
     assert html.text.count('<section class="doc-page"') == 3
     assert 'data-page="3"' in html.text
 
+    # 좌표 레이아웃 뷰 (Phase B): 페이지 섹션 + 글로벌 이미지 배치
+    layout = client.get(f"/api/jobs/{jid}/layout")
+    assert layout.status_code == 200
+    assert layout.text.count('<section class="layout-page"') == 3
+    assert f'src="/api/jobs/{jid}/files/images/p0001_0.jpg"' in layout.text
+    assert "layout-title" in layout.text
+
     img = client.get(res["images"][0])
     assert img.status_code == 200
     assert img.headers["content-type"].startswith("image/")

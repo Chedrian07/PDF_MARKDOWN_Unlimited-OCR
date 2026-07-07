@@ -320,6 +320,7 @@ const state = {
   fallbackTimer: 0,
   // result tab caches
   previewLoaded: false,
+  docLayoutLoaded: false,
   markdownLoaded: false,
   // timers
   jobsTimer: 0,
@@ -379,6 +380,7 @@ const EL_IDS = {
   dlMd: 'dl-md',
   dlZip: 'dl-zip',
   previewBody: 'preview-body',
+  doclayoutBody: 'doclayout-body',
   mdCode: 'md-code',
   copyMd: 'copy-md',
   layoutsGrid: 'layouts-grid',
@@ -724,6 +726,7 @@ async function openJob(id) {
   state.displayedStatus = null;
   state.previewLoaded = false;
   state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
   resetLiveState();
   showJobView();
   renderJobList(); // refresh active highlight
@@ -1360,7 +1363,9 @@ async function onJobDone(id, data) {
     renderThumbGrid(el.pagesGrid, [], '페이지 이미지를 불러오지 못했습니다.');
     state.previewLoaded = false;
     state.markdownLoaded = false;
+    state.docLayoutLoaded = false;
     el.previewBody.innerHTML = '';
+    el.doclayoutBody.innerHTML = '';
     el.mdCode.textContent = '';
     activateTab('preview');
   }
@@ -1423,7 +1428,9 @@ function renderResult(job) {
   // reset lazy caches for the newly opened result
   state.previewLoaded = false;
   state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
   el.previewBody.innerHTML = '';
+  el.doclayoutBody.innerHTML = '';
   el.mdCode.textContent = '';
 
   activateTab('preview');
@@ -1441,7 +1448,9 @@ function renderPartialResult(job) {
 
   state.previewLoaded = false;
   state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
   el.previewBody.innerHTML = '';
+  el.doclayoutBody.innerHTML = '';
   el.mdCode.textContent = '';
 
   activateTab('markdown');
@@ -1474,6 +1483,39 @@ function activateTab(name) {
   el.panels.forEach((p) => { p.hidden = p.dataset.panel !== name; });
   if (name === 'preview') loadPreview();
   else if (name === 'markdown') loadMarkdown();
+  else if (name === 'doclayout') loadDocLayout();
+}
+
+async function loadDocLayout() {
+  if (state.docLayoutLoaded) return;
+  const id = state.currentJobId;
+  if (!id) return;
+  el.doclayoutBody.textContent = '';
+  el.doclayoutBody.appendChild(h('p', { class: 'muted', text: '레이아웃을 불러오는 중…' }));
+  let html = null;
+  let missing = false;
+  try {
+    const res = await fetch(`/api/jobs/${id}/layout`, { headers: { Accept: 'text/html' } });
+    if (res.status === 404) missing = true;
+    else if (res.ok) html = await res.text();
+  } catch (_) { /* 아래 공통 실패 처리 */ }
+  if (state.currentJobId !== id) return;
+  el.doclayoutBody.textContent = '';
+  if (missing) {
+    state.docLayoutLoaded = true; // 404는 재시도해도 같음
+    el.doclayoutBody.appendChild(h('p', {
+      class: 'muted',
+      text: '이 작업에는 레이아웃 데이터가 없습니다 (이 기능 추가 이전에 변환된 결과).',
+    }));
+    return;
+  }
+  if (html == null) {
+    el.doclayoutBody.appendChild(h('p', { class: 'muted', text: '레이아웃 뷰를 불러오지 못했습니다.' }));
+    return;
+  }
+  state.docLayoutLoaded = true;
+  // Trusted server-rendered fragment (pipeline/layout.py — 텍스트 전부 이스케이프됨).
+  el.doclayoutBody.innerHTML = html;
 }
 
 async function loadPreview() {

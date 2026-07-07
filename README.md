@@ -97,6 +97,12 @@ PDF 업로드 → pymupdf로 페이지 PNG 렌더(기본 200dpi)
   (mdit-py-plugins dollarmath) 로컬 벤더링된 **KaTeX**(`frontend/vendor/katex/`,
   외부 CDN 없음)로 타이포셋합니다. 다운로드되는 `result.md`에는 원본 LaTeX가
   그대로 유지됩니다.
+- **렌더 충실도**: figure는 그라운딩 bbox로 계산한 **원본 페이지 대비 상대
+  폭**으로 표시되고(좁으면 센터링), 최종 미리보기는 페이지별
+  `<section class="doc-page">`로 구분됩니다. 결과 탭의 **레이아웃** 뷰는
+  전 블록의 좌표로 다단 배치까지 근사 재구성합니다 (best-effort — 텍스트
+  리플로우/검색은 마크다운 뷰 담당). 이 모든 변형은 렌더 레이어 전용이며
+  `result.md`는 순수 마크다운으로 유지됩니다.
 - C++ 모듈(`native/`)은 토큰 생성 핫패스(no-repeat-ngram)를 가속합니다.
   없으면 순수 파이썬 폴백으로 동일하게 동작합니다.
 - no-repeat-ngram 검사는 디바이스별 최적 경로를 탑니다: CUDA/MPS는 **GPU 상주

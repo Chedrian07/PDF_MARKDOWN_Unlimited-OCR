@@ -199,6 +199,13 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
 - 최종(또는 부분) 마크다운을 서버에서 HTML 프래그먼트로 렌더 (markdown-it-py, GFM 테이블 지원)
 - `<img src="images/...">` → `src="/api/jobs/{id}/files/images/..."`로 재작성됨
 
+### GET /api/jobs/{id}/layout
+- **좌표 기반 레이아웃 뷰**(Phase B): 벤더 P14의 raw_pages.json →
+  pipeline/layout.py가 파싱한 layout.json(페이지별 type/bbox 0–999/content)을
+  절대 배치 HTML로 재구성. 다단·사이드바 위치를 best-effort 근사 (폰트 차이로
+  텍스트 오버플로 가능 — 의도된 한계, 정확한 텍스트는 마크다운 뷰 담당).
+  layout.json 없으면 404 (프론트는 탭에서 안내 문구 표시)
+
 ### GET /api/jobs/{id}/files/{path}
 - 잡 디렉터리 하위 정적 파일 (pages/, images/, layout/ 만 허용, 경로 탈출 차단)
 
