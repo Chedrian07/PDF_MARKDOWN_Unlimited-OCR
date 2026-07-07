@@ -71,8 +71,12 @@ def test_enrich_injects_measured_font_sizes(tmp_path):
     assert "fs" not in empty and "bold" not in empty
 
 
-def test_enrich_empty_page_returns_false(tmp_path):
+def test_enrich_empty_page_stamps_version_without_fs(tmp_path):
+    """텍스트 레이어 없는(스캔) 페이지: fs는 못 심지만 fonts_v는 스탬프한다 —
+    매 요청 재스캔을 막기 위해 True(변경됨)를 반환하는 것이 계약."""
     import fitz
+
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
 
     doc = fitz.open()
     doc.new_page(width=612, height=792)  # 텍스트 없음
@@ -83,8 +87,9 @@ def test_enrich_empty_page_returns_false(tmp_path):
     pages = [{"page": 1, "width": 612, "height": 792, "blocks": [
         {"type": "text", "bbox": [100, 100, 900, 300], "content": "무엇이든"},
     ]}]
-    assert enrich_layout_fonts(p, pages) is False
+    assert enrich_layout_fonts(p, pages) is True   # 스탬프만으로도 저장 필요
     assert "fs" not in pages[0]["blocks"][0]
+    assert pages[0]["fonts_v"] == ENRICH_VERSION
 
 
 def test_enrich_corrupt_pdf_returns_false(tmp_path):
@@ -104,3 +109,35 @@ def test_enrich_page_index_out_of_range(tmp_path):
     # 범위를 벗어난 페이지는 조용히 스킵 — 아무것도 주입 안 함
     assert enrich_layout_fonts(pdf, pages) is False
     assert "fs" not in pages[0]["blocks"][0]
+
+
+def test_enrich_detects_vertical_text_and_stamps_version(tmp_path):
+    """90° 회전 텍스트(arXiv 여백 스탬프)는 줄 dir로 감지 → vertical="up".
+    처리된 페이지에는 fonts_v 버전이 스탬프된다."""
+    import fitz
+
+    from app.pipeline.pdf_fonts import ENRICH_VERSION
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    # rotate=90: (30, 700)에서 위쪽으로 진행하는 세로쓰기
+    page.insert_text((30, 700), "arXiv:1908.07836v1 [cs.CL] 16 Aug 2019", fontsize=9, rotate=90)
+    page.insert_text((100, 200), "normal horizontal body text " * 5, fontsize=11)
+    p = tmp_path / "source.pdf"
+    doc.save(str(p))
+    doc.close()
+
+    x1, y1 = _norm(15, 380)
+    x2, y2 = _norm(45, 720)
+    bx1, by1 = _norm(80, 170)
+    bx2, by2 = _norm(520, 220)
+    pages = [{"page": 1, "width": 612, "height": 792, "blocks": [
+        {"type": "text", "bbox": [x1, y1, x2, y2], "content": "arXiv:1908.07836v1"},
+        {"type": "text", "bbox": [bx1, by1, bx2, by2], "content": "normal body"},
+    ]}]
+    assert enrich_layout_fonts(p, pages) is True
+    vert, horiz = pages[0]["blocks"]
+    assert vert.get("vertical") == "up", vert
+    assert abs(vert["fs"] - 9 / 612 * 100) < 0.15
+    assert "vertical" not in horiz
+    assert pages[0]["fonts_v"] == ENRICH_VERSION

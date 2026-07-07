@@ -179,6 +179,17 @@ def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -
             content = text_with_math_html(str(b.get("content") or ""))
             if btype == "table":
                 content = _restore_table_tags(content)
+
+            # 세로쓰기 블록 (arXiv 왼쪽 여백 스탬프 등 90° 회전 텍스트):
+            # 텍스트 레이어의 줄 방향(pdf_fonts block["vertical"])에서 감지되고,
+            # 텍스트 레이어가 없으면(스캔 PDF) 극단적으로 좁고 긴 박스를 세로로 간주.
+            vertical = b.get("vertical") if b.get("vertical") in ("up", "down") else None
+            if vertical is None and "fs" not in b:
+                w_cqw = (x2 - x1) / 999 * 100
+                h_cqw = (y2 - y1) / 999 * 100 * page_aspect
+                if w_cqw > 0 and h_cqw / w_cqw >= 6 and len(str(b.get("content") or "")) >= 12:
+                    vertical = "up"
+            vcls = f" layout-vertical-{vertical}" if vertical else ""
             # 폰트 크기(cqw): pdf_fonts가 심은 실측 block["fs"]를 우선([0.6,6.0] 클램프),
             # 없으면 면적 휴리스틱으로 폴백. None이면 CSS 기본값 유지.
             # KaTeX도 이 font-size를 상속하므로 수식이 박스와 함께 스케일된다.
@@ -197,7 +208,7 @@ def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -
             else:
                 fs_css = ""
             blocks_html.append(
-                f'<div class="layout-block layout-{btype}" style="{style}{fs_css}" '
+                f'<div class="layout-block layout-{btype}{vcls}" style="{style}{fs_css}" '
                 f'title="{btype}">{content}</div>'
             )
         sections.append(
@@ -228,6 +239,8 @@ body { background: #eceef2; font-family: system-ui, -apple-system, 'Apple SD Got
 .layout-formula, .layout-equation { font-size: 11px; display: flex; align-items: center; justify-content: center; }
 .layout-page_number, .layout-header, .layout-footer, .layout-footnote { opacity: .45; font-size: 9px; }
 .layout-block .math-display { display: block; text-align: center; }
+.layout-vertical-up { writing-mode: sideways-lr; white-space: nowrap; text-align: center; }
+.layout-vertical-down { writing-mode: vertical-rl; white-space: nowrap; text-align: center; }
 @media print { body { background: #fff; padding: 0; } .layout-page { break-inside: avoid; } }
 """
 

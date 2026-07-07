@@ -70,6 +70,9 @@
   function fitBlock(block) {
     try {
       if (block.classList.contains('layout-image')) return;
+      // 세로쓰기 블록(writing-mode)은 scrollHeight 축이 달라 피팅 제외 —
+      // 실측 폰트 크기가 정확하고 단일 줄 스탬프라 축소가 필요 없다.
+      if (/layout-vertical-/.test(block.className)) return;
       shrinkVertical(block);
       var maths = block.querySelectorAll('.math-display');
       if (maths.length) scaleHorizontal(block, maths);

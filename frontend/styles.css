@@ -967,3 +967,7 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 /* 레이아웃 블록 내 KaTeX 수식 */
 .layout-block .math-display { display: block; text-align: center; }
 .layout-formula, .layout-equation { display: flex; align-items: center; justify-content: center; }
+
+/* 세로쓰기 블록 (arXiv 여백 스탬프 등 — pdf_fonts의 줄 방향 감지) */
+.layout-vertical-up { writing-mode: sideways-lr; white-space: nowrap; text-align: center; }
+.layout-vertical-down { writing-mode: vertical-rl; white-space: nowrap; text-align: center; }

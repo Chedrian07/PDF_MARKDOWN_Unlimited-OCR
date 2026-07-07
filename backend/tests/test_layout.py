@@ -216,6 +216,32 @@ def test_layout_standalone_self_contained(tmp_path):
     assert 'src="http' not in html and 'href="http' not in html
 
 
+def test_vertical_blocks_render_writing_mode_class():
+    pages = [{"page": 1, "width": 612, "height": 792, "blocks": [
+        {"type": "text", "bbox": [10, 300, 40, 900], "content": "arXiv:1908.07836v1 [cs.CL]",
+         "fs": 1.47, "vertical": "up"},
+        {"type": "text", "bbox": [60, 100, 940, 280], "content": "일반 본문", "fs": 1.78},
+    ]}]
+    html = render_layout_html(pages, "/b")
+    assert "layout-vertical-up" in html
+    # 일반 블록에는 세로 클래스가 붙지 않는다
+    assert html.count("layout-vertical-") == 1
+
+
+def test_vertical_geometric_fallback_without_text_layer():
+    # 텍스트 레이어 없는(fs 미주입) 스캔 PDF: 극단적으로 좁고 긴 텍스트 박스는 세로 간주
+    tall = {"type": "text", "bbox": [10, 200, 40, 900], "content": "arXiv:1908.07836v1 [cs.CL] 16 Aug 2019"}
+    normal = {"type": "text", "bbox": [60, 100, 940, 280], "content": "일반 본문 " * 20}
+    html = render_layout_html([{"page": 1, "width": 612, "height": 792, "blocks": [tall, normal]}], "/b")
+    assert "layout-vertical-up" in html
+    assert html.count("layout-vertical-") == 1
+    # fs가 실측된 좁은 박스는 (세로 플래그 없이는) 폴백을 타지 않는다
+    html2 = render_layout_html([{"page": 1, "width": 612, "height": 792, "blocks": [
+        {**tall, "fs": 1.47},
+    ]}], "/b")
+    assert "layout-vertical-" not in html2
+
+
 def test_merge_ingests_layout_json(tmp_path):
     (tmp_path / "pages").mkdir()
     m = IncrementalMerger(tmp_path, "\n\n---\n\n")

@@ -217,16 +217,19 @@ def _backfill_layout_fonts(job, pages: list) -> None:
     src = job.dir / "source.pdf"
     if not src.exists():
         return
+    try:
+        from .pipeline.pdf_fonts import ENRICH_VERSION, enrich_layout_fonts
+    except Exception:
+        return
+    # 버전 스탬프 기반: enrichment 스키마가 갱신되면(예: 세로쓰기 감지 추가)
+    # 기존 잡도 1회 재백필된다. 스탬프가 최신이면 매 요청 재스캔하지 않는다.
     needs = any(
-        isinstance(b, dict) and not b.get("image") and "fs" not in b
-        for pg in pages if isinstance(pg, dict)
-        for b in (pg.get("blocks") or ())
+        isinstance(pg, dict) and int(pg.get("fonts_v") or 0) < ENRICH_VERSION
+        for pg in pages
     )
     if not needs:
         return
     try:
-        from .pipeline.pdf_fonts import enrich_layout_fonts
-
         if enrich_layout_fonts(src, pages):
             import os
 
