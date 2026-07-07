@@ -109,6 +109,7 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=''):
     font = ImageFont.load_default()
 
     img_idx = 0
+    crop_boxes = {}  # [vendor patch P13] figure bbox export용
     
     for i, ref in enumerate(refs):
         try:
@@ -132,6 +133,10 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=''):
                         try:
                             cropped = image.crop((x1, y1, x2, y2))
                             cropped.save(f"{ouput_path}/images/{image_prefix}{img_idx}.jpg")
+                            crop_boxes[f"{image_prefix}{img_idx}.jpg"] = {  # [vendor patch P13]
+                                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                                "image_width": image_width, "image_height": image_height,
+                            }
                         except Exception as e:
                             print(e)
                             pass
@@ -159,6 +164,21 @@ def draw_bounding_boxes(image, refs, ouput_path, image_prefix=''):
                         pass
         except:
             continue
+    # [vendor patch P13] 크롭 시점에만 알 수 있는 bbox(픽셀)·페이지 크기를 남긴다 —
+    # 렌더 레이어가 원본 페이지 대비 상대 폭 계산에 사용 (업스트림은 여기서 버림).
+    # infer_multi가 페이지별로 재호출하므로 read-modify-write로 병합 (단일 워커 전제).
+    if crop_boxes:
+        import json as _json
+        _boxes_path = f"{ouput_path}/boxes.json"
+        try:
+            with open(_boxes_path, encoding="utf-8") as _bf:
+                _existing = _json.load(_bf)
+        except Exception:
+            _existing = {}
+        _existing.update(crop_boxes)
+        with open(_boxes_path, "w", encoding="utf-8") as _bf:
+            _json.dump(_existing, _bf, ensure_ascii=False, indent=1)
+
     img_draw.paste(overlay, (0, 0), overlay)
     return img_draw
 

@@ -79,6 +79,29 @@ def test_currency_dollars_not_math():
     assert "$5" in html and "$10" in html
 
 
+def test_figure_width_injected_from_boxes():
+    boxes = {
+        "p0001_0.jpg": {"x1": 100, "y1": 0, "x2": 500, "y2": 300, "image_width": 1000, "image_height": 1400},
+        "p0002_0.jpg": {"x1": 20, "y1": 0, "x2": 980, "y2": 300, "image_width": 1000, "image_height": 1400},
+    }
+    md = "![](images/p0001_0.jpg)\n\n![](images/p0002_0.jpg)\n\n![](images/p0009_9.jpg)"
+    html = render_markdown_html(md, "/b", figure_boxes=boxes)
+    # 40% → 센터링 포함
+    assert 'style="width:40.0%;height:auto;display:block;margin-left:auto;margin-right:auto;"' in html
+    # 96% → 센터링 없음
+    assert 'style="width:96.0%;height:auto;"' in html
+    # 메타 없는 이미지는 원래 태그 유지 (폴백)
+    assert '<img src="/b/images/p0009_9.jpg" alt="" />' in html
+
+
+def test_figure_width_fallback_without_boxes():
+    md = "![](images/p0001_0.jpg)"
+    html = render_markdown_html(md, "/b")
+    assert 'style=' not in html
+    html2 = render_markdown_html(md, "/b", figure_boxes={"p0001_0.jpg": {"x1": 0}})  # 불완전 메타
+    assert 'style=' not in html2
+
+
 def test_model_html_tables_restored_safely():
     # Unlimited-OCR 실출력 형태: HTML 표 + 잠재적 악성 태그 혼재
     md = ('<table><tr><td>Mode</td><td colspan="2">base</td></tr></table>\n\n'

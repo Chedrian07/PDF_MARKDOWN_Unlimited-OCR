@@ -54,6 +54,24 @@ class FakeEngine(OCREngine):
         for i in range(0, len(text), step):
             sink.on_text(text[i : i + step])
 
+    def _record_box(self, out_dir: Path, img_name: str, crop_box: tuple, size: tuple) -> None:
+        """실엔진(벤더 P13)과 동일한 boxes.json 계약을 흉내낸다."""
+        import json
+
+        p = out_dir / "boxes.json"
+        data = {}
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        x1, y1, x2, y2 = crop_box
+        data[img_name] = {
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "image_width": size[0], "image_height": size[1],
+        }
+        p.write_text(json.dumps(data), encoding="utf-8")
+
     def _fake_page(
         self, image_path: Path, out_dir: Path, page_idx: int, img_name: str, overlay_name: str
     ) -> str:
@@ -62,6 +80,7 @@ class FakeEngine(OCREngine):
             w, h = im.size
             crop_box = (w // 8, h // 8, w // 2, h // 2)
             im.crop(crop_box).save(out_dir / "images" / img_name, quality=90)
+            self._record_box(out_dir, img_name, crop_box, (w, h))
             overlay = im.copy()
             ImageDraw.Draw(overlay).rectangle(crop_box, outline=(220, 30, 30), width=4)
             overlay.save(out_dir / overlay_name, quality=85)

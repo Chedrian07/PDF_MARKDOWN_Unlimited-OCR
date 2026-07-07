@@ -79,6 +79,31 @@ def test_single_mode_merge(tmp_path):
     assert (tmp_path / "layout" / "page_0005.jpg").is_file()
 
 
+def test_figure_boxes_merged_with_global_names(tmp_path):
+    import json
+
+    m = IncrementalMerger(tmp_path, SEP)
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 2)
+    (c / "boxes.json").write_text(json.dumps({
+        "page_0_0.jpg": {"x1": 10, "y1": 20, "x2": 410, "y2": 320, "image_width": 1000, "image_height": 1400},
+        "page_1_0.jpg": {"x1": 0, "y1": 0, "x2": 950, "y2": 500, "image_width": 1000, "image_height": 1400},
+    }), encoding="utf-8")
+    m.add_chunk(ChunkResult(c, 3, 2, "<PAGE>\n![](images/page_0_0.jpg)\n<PAGE>\n![](images/page_1_0.jpg)"))
+
+    saved = json.loads((tmp_path / "images" / "boxes.json").read_text(encoding="utf-8"))
+    assert saved["p0003_0.jpg"]["x2"] == 410
+    assert saved["p0004_0.jpg"]["image_width"] == 1000
+    assert m.figure_boxes == saved
+
+
+def test_missing_boxes_json_is_fine(tmp_path):
+    m = IncrementalMerger(tmp_path, SEP)
+    c = _mk_multi_chunk(tmp_path, "chunk_00", 1)
+    m.add_chunk(ChunkResult(c, 1, 1, "<PAGE>\n![](images/page_0_0.jpg)"))
+    assert not (tmp_path / "images" / "boxes.json").exists()
+    assert m.figure_boxes == {}
+
+
 def test_special_tokens_stripped(tmp_path):
     m = IncrementalMerger(tmp_path, SEP)
     d = tmp_path / "work" / "chunk_00"

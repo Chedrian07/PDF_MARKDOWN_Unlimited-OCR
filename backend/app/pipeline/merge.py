@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -64,10 +65,23 @@ class IncrementalMerger:
         self.layout_dir.mkdir(parents=True, exist_ok=True)
         self.pages_md: list[str] = []
         self.warnings: list[str] = []
+        # 글로벌 이미지명 → figure bbox 메타 (벤더 P13의 boxes.json — 렌더 폭 계산용)
+        self.figure_boxes: dict[str, dict] = {}
 
     # ── 파일 이동 ──────────────────────────────────────────────
 
+    def _load_chunk_boxes(self, chunk: ChunkResult) -> dict:
+        p = chunk.chunk_dir / "boxes.json"
+        if not p.is_file():
+            return {}
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
     def _move_chunk_files(self, chunk: ChunkResult) -> None:
+        chunk_boxes = self._load_chunk_boxes(chunk)
         img_src = chunk.chunk_dir / "images"
         if img_src.is_dir():
             for f in sorted(img_src.iterdir()):
@@ -82,7 +96,11 @@ class IncrementalMerger:
                         continue
                     local_page, k = int(m.group(1)), m.group(2)
                     dest = self.images_dir / _global_image_name(chunk.start_page + local_page, k)
+                meta = chunk_boxes.get(f.name)
+                if isinstance(meta, dict):
+                    self.figure_boxes[dest.name] = meta
                 shutil.move(str(f), str(dest))
+        self._write_boxes()
 
         if chunk.single:
             boxes = chunk.chunk_dir / "result_with_boxes.jpg"
@@ -94,6 +112,12 @@ class IncrementalMerger:
                 if m:
                     g = chunk.start_page + int(m.group(1))
                     shutil.move(str(f), str(self.layout_dir / f"page_{g:04d}.jpg"))
+
+    def _write_boxes(self) -> None:
+        if self.figure_boxes:
+            (self.images_dir / "boxes.json").write_text(
+                json.dumps(self.figure_boxes, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
 
     # ── 마크다운 재작성 ────────────────────────────────────────
 

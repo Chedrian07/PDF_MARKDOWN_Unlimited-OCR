@@ -175,6 +175,18 @@ def _read_markdown(job) -> tuple[str, bool]:
     return text, job.status != "done"
 
 
+def _load_figure_boxes(job) -> dict | None:
+    """벤더 P13 → merge가 통합한 images/boxes.json (없으면 풀폭 폴백)."""
+    p = job.dir / "images" / "boxes.json"
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
 @router.get("/jobs/{job_id}/markdown")
 def job_markdown(request: Request, job_id: str) -> PlainTextResponse:
     job = _get_job(request, job_id)
@@ -187,7 +199,9 @@ def job_markdown(request: Request, job_id: str) -> PlainTextResponse:
 def job_html(request: Request, job_id: str) -> HTMLResponse:
     job = _get_job(request, job_id)
     text, partial = _read_markdown(job)
-    html = render_markdown_html(text, f"/api/jobs/{job_id}/files")
+    html = render_markdown_html(
+        text, f"/api/jobs/{job_id}/files", figure_boxes=_load_figure_boxes(job)
+    )
     headers = {"X-Partial": "true"} if partial else {}
     return HTMLResponse(html, headers=headers)
 
@@ -245,12 +259,16 @@ def cancel_job(request: Request, job_id: str) -> dict:
 async def render_preview(request: Request, job_id: str) -> HTMLResponse:
     """클라이언트가 보낸 (정리된) 마크다운을 안전 렌더 — 라이브 미리보기용.
     /html과 동일한 렌더러라 XSS 이스케이프·표 복원·이미지 URL 재작성이 적용된다."""
-    _get_job(request, job_id)
+    job = _get_job(request, job_id)
     body = await request.body()
     if len(body) > 2_000_000:
         raise HTTPException(413, "미리보기 본문이 너무 큽니다 (2MB 초과)")
     text = body.decode("utf-8", "replace")
-    return HTMLResponse(render_markdown_html(text, f"/api/jobs/{job_id}/files"))
+    return HTMLResponse(
+        render_markdown_html(
+            text, f"/api/jobs/{job_id}/files", figure_boxes=_load_figure_boxes(job)
+        )
+    )
 
 
 @router.delete("/jobs/{job_id}", status_code=204)

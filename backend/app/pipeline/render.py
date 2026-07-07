@@ -95,8 +95,43 @@ def _normalize_math_delimiters(md_text: str) -> str:
     return md_text
 
 
-def render_markdown_html(markdown_text: str, files_base_url: str) -> str:
-    """`![](images/...)` 상대 참조를 잡 파일 서빙 URL로 재작성해 렌더."""
+# ── figure 상대 폭 주입 (렌더 후처리 — result.md/원문 불변) ───────────
+# 벤더 P13이 export한 boxes.json(픽셀 bbox + 페이지 크기)으로 각 figure를
+# 원본 페이지 대비 상대 폭으로 표시. 값은 전부 서버가 계산한 숫자라 안전하다.
+_IMG_TAG = re.compile(r'<img src="([^"]+/images/([^"/]+))" alt="([^"]*)"\s*/?>')
+_CENTER_THRESHOLD = 0.6
+_MIN_REL_W = 0.08
+
+
+def _inject_figure_widths(html: str, figure_boxes: dict) -> str:
+    def _repl(m: re.Match) -> str:
+        src, name, alt = m.groups()
+        meta = figure_boxes.get(name)
+        if not isinstance(meta, dict):
+            return m.group(0)
+        try:
+            rel_w = (float(meta["x2"]) - float(meta["x1"])) / float(meta["image_width"])
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return m.group(0)
+        if not (0 < rel_w <= 1.5):  # 비정상 메타는 무시하고 풀폭 폴백
+            return m.group(0)
+        rel_w = min(max(rel_w, _MIN_REL_W), 1.0)
+        style = f"width:{rel_w * 100:.1f}%;height:auto;"
+        if rel_w < _CENTER_THRESHOLD:
+            style += "display:block;margin-left:auto;margin-right:auto;"
+        return f'<img src="{src}" alt="{alt}" style="{style}">'
+
+    return _IMG_TAG.sub(_repl, html)
+
+
+def render_markdown_html(
+    markdown_text: str, files_base_url: str, figure_boxes: dict | None = None
+) -> str:
+    """`![](images/...)` 상대 참조를 잡 파일 서빙 URL로 재작성해 렌더.
+    figure_boxes(images/boxes.json)가 있으면 figure에 원본 상대 폭을 주입한다."""
     html = _md.render(_normalize_math_delimiters(markdown_text))
     html = _restore_table_tags(html)
-    return html.replace('src="images/', f'src="{files_base_url}/images/')
+    html = html.replace('src="images/', f'src="{files_base_url}/images/')
+    if figure_boxes:
+        html = _inject_figure_widths(html, figure_boxes)
+    return html

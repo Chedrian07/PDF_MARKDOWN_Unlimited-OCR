@@ -55,6 +55,9 @@ def test_full_flow_multi(client, sample_pdf):
     html = client.get(f"/api/jobs/{jid}/html")
     assert f'src="/api/jobs/{jid}/files/images/p0001_0.jpg"' in html.text
     assert "<table>" in html.text
+    # FakeEngine boxes.json 경유 상대 폭: 크롭 (w//8..w//2) ≈ 37.5% → 센터링 포함
+    assert "width:37.5%" in html.text
+    assert "margin-left:auto" in html.text
 
     img = client.get(res["images"][0])
     assert img.status_code == 200

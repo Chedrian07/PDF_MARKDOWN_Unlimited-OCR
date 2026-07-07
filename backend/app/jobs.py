@@ -55,7 +55,12 @@ class Job:
             d = self.dir / subdir
             if not d.is_dir():
                 return []
-            return [f"{base}/files/{subdir}/{f.name}" for f in sorted(d.iterdir()) if f.is_file()]
+            # 이미지 파일만 — images/boxes.json 같은 메타 파일은 목록에서 제외
+            return [
+                f"{base}/files/{subdir}/{f.name}"
+                for f in sorted(d.iterdir())
+                if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png")
+            ]
 
         return {
             "markdown_url": f"{base}/markdown",
