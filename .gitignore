@@ -27,3 +27,6 @@ nohup.out
 # HF cache (로컬 개발 시)
 hf-cache/
 *.tmp.*
+
+# 로컬 환경 (API 키 포함 — 절대 커밋 금지)
+.env
