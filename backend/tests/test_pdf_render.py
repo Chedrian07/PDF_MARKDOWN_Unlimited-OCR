@@ -1,7 +1,7 @@
 import pytest
 
 from app.pipeline.pdf import probe_pdf, render_pdf_pages
-from app.pipeline.render import render_markdown_html
+from app.pipeline.render import render_document_html, render_markdown_html
 
 from conftest import make_pdf_bytes
 
@@ -100,6 +100,23 @@ def test_figure_width_fallback_without_boxes():
     assert 'style=' not in html
     html2 = render_markdown_html(md, "/b", figure_boxes={"p0001_0.jpg": {"x1": 0}})  # 불완전 메타
     assert 'style=' not in html2
+
+
+def test_document_html_wraps_pages_in_sections():
+    md = "# P1 제목\n\n본문 1\n\n---\n\n본문 2 \\( x^2 \\)\n\n---\n\n본문 3"
+    html = render_document_html(md, "/b", page_separator="\n\n---\n\n")
+    assert html.count('<section class="doc-page"') == 3
+    assert 'data-page="1"' in html and 'data-page="3"' in html
+    assert "<hr" not in html  # 구분자가 hr로 렌더되지 않고 섹션 경계로 승격됨
+    assert "본문 3" in html
+    assert '<span class="math-inline">x^2</span>' in html  # 섹션 내부도 동일 렌더러
+
+
+def test_document_html_single_page_stays_flat():
+    html = render_document_html("한 페이지 문서", "/b", page_separator="\n\n---\n\n")
+    assert "<section" not in html
+    assert "한 페이지 문서" in html
+    assert render_document_html("", "/b") == ""
 
 
 def test_model_html_tables_restored_safely():

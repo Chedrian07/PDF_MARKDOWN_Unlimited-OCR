@@ -135,3 +135,28 @@ def render_markdown_html(
     if figure_boxes:
         html = _inject_figure_widths(html, figure_boxes)
     return html
+
+
+def render_document_html(
+    markdown_text: str,
+    files_base_url: str,
+    figure_boxes: dict | None = None,
+    page_separator: str = "\n\n---\n\n",
+) -> str:
+    """최종 문서 렌더(/html 전용): 페이지 경계를 `<section class="doc-page">`로 승격.
+
+    소스(result.md)는 포터빌리티를 위해 `---` 구분자를 유지하고, 경계 해석은
+    렌더에서만 한다. 본문이 우연히 구분자와 동일한 텍스트를 포함하면 초과
+    분할될 수 있는 best-effort 휴리스틱 (실측 코퍼스에서 미관측).
+    라이브 프리뷰(/render-preview)는 기존 flat 렌더를 그대로 쓴다.
+    """
+    if not markdown_text.strip():
+        return ""
+    segments = markdown_text.split(page_separator) if page_separator else [markdown_text]
+    if len(segments) == 1:
+        return render_markdown_html(markdown_text, files_base_url, figure_boxes)
+    parts = []
+    for i, seg in enumerate(segments, start=1):
+        inner = render_markdown_html(seg, files_base_url, figure_boxes)
+        parts.append(f'<section class="doc-page" data-page="{i}">\n{inner}</section>')
+    return "\n".join(parts)

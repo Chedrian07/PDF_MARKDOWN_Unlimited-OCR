@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 
 from . import native_ops
 from .pipeline.pdf import probe_pdf
-from .pipeline.render import render_markdown_html
+from .pipeline.render import render_document_html, render_markdown_html
 
 router = APIRouter(prefix="/api")
 
@@ -199,8 +199,11 @@ def job_markdown(request: Request, job_id: str) -> PlainTextResponse:
 def job_html(request: Request, job_id: str) -> HTMLResponse:
     job = _get_job(request, job_id)
     text, partial = _read_markdown(job)
-    html = render_markdown_html(
-        text, f"/api/jobs/{job_id}/files", figure_boxes=_load_figure_boxes(job)
+    html = render_document_html(
+        text,
+        f"/api/jobs/{job_id}/files",
+        figure_boxes=_load_figure_boxes(job),
+        page_separator=_state(request).settings.page_separator,
     )
     headers = {"X-Partial": "true"} if partial else {}
     return HTMLResponse(html, headers=headers)

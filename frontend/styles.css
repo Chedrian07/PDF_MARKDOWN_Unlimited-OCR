@@ -896,3 +896,20 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 }
 .markdown-body .katex { font-size: 1.06em; }
 .live-preview.markdown-body > .math-display { text-align: center; }
+
+/* ── 문서 페이지 섹션 + 타이포 (A3 — /html 최종 렌더 전용) ───────────── */
+.markdown-body { max-width: 72ch; margin-inline: auto; }
+.doc-page { position: relative; padding: 8px 0 30px; }
+.doc-page + .doc-page { border-top: 2px dashed var(--border-strong); margin-top: 14px; padding-top: 22px; }
+.doc-page::after {
+  content: "— " attr(data-page) " —";
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.4;
+}
+.markdown-body table { margin: 14px 0; }
+.markdown-body img { border-radius: 4px; }

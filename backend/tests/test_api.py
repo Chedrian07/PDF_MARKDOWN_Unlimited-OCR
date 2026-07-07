@@ -58,6 +58,9 @@ def test_full_flow_multi(client, sample_pdf):
     # FakeEngine boxes.json 경유 상대 폭: 크롭 (w//8..w//2) ≈ 37.5% → 센터링 포함
     assert "width:37.5%" in html.text
     assert "margin-left:auto" in html.text
+    # 페이지 경계가 doc-page 섹션으로 승격됨 (3페이지)
+    assert html.text.count('<section class="doc-page"') == 3
+    assert 'data-page="3"' in html.text
 
     img = client.get(res["images"][0])
     assert img.status_code == 200
