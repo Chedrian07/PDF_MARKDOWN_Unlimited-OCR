@@ -19,7 +19,7 @@ SYSTEM_TRANSLATE = """당신은 학술 논문 전문 번역가다. 입력으로 
 2. <m1 v="x"/> <c2/> <f3 v="Figure 2"/> 같은 꺾쇠 태그는 수식·인용·참조를 가리키는 불변 토큰이다. 태그를 단 하나도 빠뜨리거나 추가하지 말고, 원문에 나온 그대로(속성 포함) 번역문의 알맞은 위치에 복사한다.
 3. 용어집이 주어지면 반드시 그 역어를 쓴다. 같은 용어는 문서 전체에서 하나의 표기만 쓴다.
 4. "첫 등장 병기" 목록에 있는 용어는 이번에 한해 "역어(원어)" 형태로 쓴다. 예: 스파스 어텐션(sparse attention). 목록에 없는 용어는 병기하지 않는다.
-5. 고유명사·모델명·데이터셋명·약어(BERT, ImageNet, CNN, mAP 등)는 번역·음차하지 말고 원문 그대로 둔다.
+5. 고유명사·인명·모델명·데이터셋명·약어(BERT, ImageNet, CNN, mAP 등)는 번역·음차하지 말고 원문 그대로 둔다. 인명도 한글로 음차하지 않는다 — Shannon, Vaswani, Hinton은 '섀넌·바스와니·힌턴'이 아니라 Shannon·Vaswani·Hinton 그대로 쓴다. 소유격은 원문에 조사만 붙인다: "Shannon's theorem" → "Shannon의 정리"(O), "섀넌의 정리"(X).
 6. 마크다운 표기(# 제목, **굵게**, *기울임*, | 표 |, - 목록)는 구조를 그대로 유지한 채 텍스트만 번역한다.
 7. 내용을 추가·요약·생략하지 않는다. 문장 수를 유지하려 애쓰되 자연스러운 한국어가 우선이다.
 8. 외래어는 국립국어원 외래어 표기법을 따른다 (데이터, 애플리케이션, 콘텐츠, 메시지).
@@ -46,10 +46,17 @@ def build_unit_prompt(
     glossary_pairs: list[tuple[str, str]],
     first_terms: list[tuple[str, str]],
     context_tail: str | None = None,
+    keep_terms: list[str] | None = None,
 ) -> str:
-    """유닛 하나의 user 메시지. glossary_pairs/first_terms는 이 유닛에
-    실제로 등장하는 용어만 추려서 넘긴다 (프롬프트 비대화 방지)."""
+    """유닛 하나의 user 메시지. glossary_pairs/first_terms/keep_terms는 이 유닛에
+    실제로 등장하는 용어만 추려서 넘긴다 (프롬프트 비대화 방지).
+
+    keep_terms(policy A 원형): 규칙 5만으로는 산문 속 약어를 풀어쓰는 사례가
+    실측됨(MSE→"평균 제곱 오차") — 유닛별 명시 목록이 강제력을 만든다."""
     parts: list[str] = []
+    if keep_terms:
+        lines = "\n".join(f"- {t}" for t in keep_terms)
+        parts.append(f"[원문 유지 — 다음 표기는 번역·풀어쓰기·음차 없이 그대로 쓴다]\n{lines}")
     if glossary_pairs:
         lines = "\n".join(f"- {s} → {k}" for s, k in glossary_pairs)
         parts.append(f"[용어집 — 반드시 이 역어 사용]\n{lines}")
@@ -62,12 +69,19 @@ def build_unit_prompt(
     return "\n\n".join(parts)
 
 
-def build_retry_suffix(missing: list[str]) -> str:
-    """플레이스홀더 소실 시 1회 재시도에 덧붙이는 강조 지시."""
-    tags = " ".join(missing[:8])
+def build_repair_prompt(masked_src: str, broken_output: str, bad_tags: list[str]) -> str:
+    """플레이스홀더 누락·중복 수정 패스 user 메시지 — SYSTEM_TRANSLATE와 함께 쓴다.
+
+    재번역이 아니라 태그 수리다: 원문(태그 포함)과 방금 나온 깨진 번역문을 함께 주고,
+    번역 내용은 유지한 채 태그만 원문과 일치시키도록 요구한다. 첫 줄 헤더는 한 줄로
+    유지한다(테스트·파서가 마스킹 원문을 안정적으로 되뽑을 수 있게)."""
+    tags = " ".join(bad_tags[:12])
     return (
-        f"\n\n[중요] 직전 번역에서 불변 토큰이 누락되었다: {tags}\n"
-        "모든 꺾쇠 태그를 원문 그대로, 각각 정확히 한 번씩 포함해 다시 번역하라."
+        f"[원문 — 아래 꺾쇠 태그가 정답이다]\n{masked_src}\n\n"
+        f"[수정할 번역문]\n{broken_output}\n\n"
+        f"다음 꺾쇠 태그가 누락되었거나 중복되었다: {tags}\n"
+        "번역 내용은 그대로 두고 태그만 바로잡아, 모든 꺾쇠 태그가 원문과 똑같이 "
+        "(속성 포함) 각각 정확히 한 번씩 나타나게 하라. 수정한 번역문만 출력한다."
     )
 
 

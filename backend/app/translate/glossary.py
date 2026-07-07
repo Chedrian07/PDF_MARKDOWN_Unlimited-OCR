@@ -23,7 +23,8 @@ from . import prompts
 
 _SEED_PATH = Path(__file__).parent / "data" / "seed_ko.json"
 
-# 대문자 n그램 후보에서 제외할 문두 일반어
+# 대문자 n그램 후보에서 제외할 문두 일반어 — LLM 판정 엔트리에도 같은 가드를 건다
+# (실측: LLM이 수학 산문 문두어 "Let"을 policy A로 등재 → 전 문서 위반 유발)
 _STOPWORDS = {
     "the", "we", "in", "this", "a", "an", "it", "our", "however", "these", "those",
     "for", "and", "of", "to", "is", "are", "was", "were", "that", "with", "as",
@@ -31,7 +32,27 @@ _STOPWORDS = {
     "such", "can", "more", "most", "than", "then", "thus", "here", "there",
     "when", "while", "where", "if", "but", "not", "all", "each", "both", "we",
     "figure", "table", "section", "equation", "appendix", "algorithm", "fig", "eq",
+    # 수학·학술 산문 문두어 (Let x be…, Note that…, Given a…)
+    "let", "given", "note", "suppose", "assume", "consider", "define", "denote",
+    "since", "therefore", "hence", "moreover", "furthermore", "finally", "next",
+    "now", "recall", "observe", "otherwise", "similarly", "conversely",
+    "first", "second", "third",
+    # 전치사·접속사·문두 수식어 (실측: LLM이 Despite→비록, Compared→Compared 등재)
+    "despite", "although", "though", "unlike", "whereas", "during", "within",
+    "without", "between", "among", "until", "unless", "across", "beyond",
+    "above", "below", "under", "over", "compared", "using", "based",
+    "toward", "towards", "via", "per", "fine",
 }
+
+
+def _valid_a_entry(ko: str) -> bool:
+    """policy A(원문 유지) 엔트리 형태 검증 — 대문자 2개 미만의 단일 title-case
+    일반어(Long, Model, Fine, to-end)를 걸러낸다. 실측: LLM이 문두 대문자
+    일반어를 고유명사로 오판해 문서당 수십 건의 위반 오탐을 만들었다.
+    CNN·MSE(전대문자), PubLayNet·GPT-4(내부 대문자), 다단어 고유명사는 통과."""
+    if " " in ko:
+        return True  # 다단어 고유명사구 (Unlimited OCR 등)
+    return sum(c.isupper() for c in ko) >= 2
 
 _CAP_NGRAM_RE = re.compile(r"\b[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2}\b")
 _HYPHEN_RE = re.compile(r"\b[a-z]+(?:-[a-z]+)+\b")
@@ -56,6 +77,28 @@ def _strip_tokens(md_text: str) -> str:
     return _PLACEHOLDER_RE.sub(" ", masked)
 
 
+def _drop_shouty_lines(scan: str) -> str:
+    """전대문자 제목/헤딩 줄 제거 — 약어·후보 추출 전용 전처리.
+
+    실측(PubLayNet): 제목 "LARGEST DATASET EVER FOR DOCUMENT LAYOUT ANALYSIS"의
+    OF·LAYOUT·TABLE이 약어(policy A)로 등재돼 문서 전역 위반 161건을 만들었다.
+    알파벳의 70%+가 대문자이고 단어 2개+인 줄은 산문이 아니라 제목으로 본다 —
+    진짜 약어(CNN 등)는 혼합 대소문자 산문에도 반드시 다시 나타난다."""
+    kept = []
+    for ln in scan.split("\n"):
+        alpha = re.findall(r"[A-Za-z]", ln)
+        words = re.findall(r"[A-Za-z]{2,}", ln)
+        if len(words) >= 2 and alpha and sum(c.isupper() for c in alpha) / len(alpha) > 0.7:
+            continue
+        kept.append(ln)
+    return "\n".join(kept)
+
+
+def _stem(s: str) -> str:
+    """중복 판정용 초경량 스테밍 — fine-tuned/fine-tuning이 같은 용어로 취급되게."""
+    return re.sub(r"(?:ing|ed|es|s)$", "", s)
+
+
 class Glossary:
     def __init__(self, entries: list[GlossaryEntry] | None = None) -> None:
         self.entries: list[GlossaryEntry] = entries or []
@@ -74,17 +117,31 @@ class Glossary:
         """이 유닛에 등장하는 (일반 용어쌍 B/C/D, 첫 등장 병기쌍 D)를 반환.
 
         unit_id가 엔트리의 first_unit과 일치하는 D 항목만 병기 목록에 들어간다.
+        수식·코드·인용 내부 매칭 방지 — 번역 대상 텍스트(마스킹 잔여)에서만 찾는다
+        (실측: `\\mathrm{mse}` 안의 mse가 매칭돼 프롬프트·캐시 키를 오염시켰다).
         """
+        scan = _strip_tokens(text)
         general: list[tuple[str, str]] = []
         first: list[tuple[str, str]] = []
         for e in self.entries:
             if e.policy == "A":
                 continue
-            if self._matcher(e.src).search(text):
+            if self._matcher(e.src).search(scan):
                 general.append((e.src, e.ko))
                 if e.policy == "D" and unit_id and e.first_unit == unit_id:
                     first.append((e.src, e.ko))
         return general, first
+
+    def keep_terms(self, text: str) -> list[str]:
+        """이 유닛의 번역 대상 텍스트에 등장하는 policy A 표기(원형) 목록.
+
+        프롬프트의 [원문 유지] 섹션용 — 규칙 5(약어·고유명사 유지)만으로는 모델이
+        산문 속 약어를 풀어쓰는 사례가 실측됨(MSE→"평균 제곱 오차"). 유닛별로
+        명시해야 강제력이 생긴다. 결정성 위해 정렬, 프롬프트 비대화 방지 상한 12."""
+        scan = _strip_tokens(text)
+        out = sorted({e.ko for e in self.entries
+                      if e.policy == "A" and self._matcher(e.src).search(scan)})
+        return out[:12]
 
     def compute_first_units(self, ordered_units) -> None:
         """문서 순서의 유닛들을 스캔해 각 엔트리의 first_unit(첫 등장 유닛 id)을 채운다."""
@@ -122,7 +179,7 @@ def extract_candidates(md_text: str) -> list[str]:
 
     전대문자 약어는 여기서 제외한다(build_glossary가 자동 policy A로 처리).
     """
-    text = _strip_tokens(md_text)
+    text = _drop_shouty_lines(_strip_tokens(md_text))
     cap = Counter()
     for m in _CAP_NGRAM_RE.finditer(text):
         phrase = re.sub(r"\s+", " ", m.group()).strip()
@@ -162,15 +219,17 @@ def build_glossary(md_text: str, ordered_units, client, cfg) -> Glossary:
     g = Glossary(load_seed())
     seen = {e.src for e in g.entries}
 
-    # 자동 약어 → policy A (프롬프트/캐시엔 안 들어가지만 문서 참조용으로 기록)
-    scan = _strip_tokens(md_text)
+    # 자동 약어 → policy A. 전대문자 제목/헤딩 줄은 제외 — OF·LAYOUT 같은 일반어가
+    # 약어로 오등재되는 것을 막는다 (진짜 약어는 혼합 대소문자 산문에 다시 나온다).
+    scan = _drop_shouty_lines(_strip_tokens(md_text))
     for ac in sorted(set(_ACRONYM_RE.findall(scan))):
-        if ac.lower() in seen:
+        if ac.lower() in seen or ac.lower() in _STOPWORDS:
             continue
         g.entries.append(GlossaryEntry(ac.lower(), ac, "A"))
         seen.add(ac.lower())
 
     cands = [c for c in extract_candidates(md_text) if c.lower() not in seen]
+    seen_stems = {_stem(s) for s in seen}
 
     if client is not None and cands:
         try:
@@ -185,10 +244,15 @@ def build_glossary(md_text: str, ordered_units, client, cfg) -> Glossary:
                 pol = str(it.get("policy", "")).strip().upper()
                 if not src or not ko or pol not in ("A", "B", "C", "D"):
                     continue
-                if src in seen:
+                # 스테밍 중복 가드: 시드 fine-tuning(파인튜닝)이 있는데 LLM이
+                # fine-tuned(미세 조정된)를 추가하면 문서 내 표기가 갈라진다.
+                if src in seen or src in _STOPWORDS or _stem(src) in seen_stems:
+                    continue
+                if pol == "A" and not _valid_a_entry(ko):
                     continue
                 g.entries.append(GlossaryEntry(src, ko, pol))
                 seen.add(src)
+                seen_stems.add(_stem(src))
         except Exception as e:  # noqa: BLE001 — LLM 실패는 치명적이지 않다
             g.warnings.append(f"용어집 LLM 판정 실패 — 시드로 진행: {e}")
 

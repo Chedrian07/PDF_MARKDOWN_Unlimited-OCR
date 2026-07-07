@@ -105,3 +105,59 @@ def test_save_load_왕복(tmp_path):
     g2 = Glossary.load(p)
     assert g2.entries[0].src == "attention"
     assert g2.entries[0].first_unit == "md:0:1"
+
+
+def test_전대문자_제목줄은_약어_추출에서_제외():
+    """실측(PubLayNet): 올캡 제목의 OF·LAYOUT·TABLE이 약어로 오등재 → 전역 위반 161건.
+    소리치는 줄은 빼고, 혼합 대소문자 산문의 진짜 약어(CNN)는 살린다."""
+    from app.translate.glossary import build_glossary
+
+    md = ("PUBLAYNET: LARGEST DATASET EVER FOR DOCUMENT LAYOUT ANALYSIS\n\n"
+          "We train a CNN on the dataset. The CNN performs well.\n")
+    g = build_glossary(md, [], None, None)
+    srcs = {e.src for e in g.entries if e.policy == "A"}
+    assert "cnn" in srcs
+    for junk in ("of", "layout", "table", "dataset", "analysis", "ever", "largest"):
+        assert junk not in srcs, junk
+
+
+def test_LLM_엔트리_스테밍_중복_가드(monkeypatch):
+    """시드 fine-tuning(파인튜닝)이 있으면 LLM의 fine-tuned(미세 조정된)는 거부 —
+    같은 용어의 표기 분열 방지. 스톱워드(let)도 거부."""
+    from app.translate.glossary import build_glossary
+
+    class FakeClient:
+        def complete(self, system, user, *, max_tokens):
+            return ('[{"src":"fine-tuned","ko":"미세 조정된","policy":"B"},'
+                    '{"src":"let","ko":"Let","policy":"A"},'
+                    '{"src":"resampler","ko":"리샘플러","policy":"C"}]')
+
+    md = ("We fine-tuned the model with a Resampler stage. "
+          "It uses a Resampler twice, and adds a Resampler at the end.\n")
+    g = build_glossary(md, [], FakeClient(), None)
+    srcs = {e.src for e in g.entries}
+    assert "resampler" in srcs           # 정상 엔트리는 통과
+    assert "fine-tuned" not in srcs      # 시드 fine-tuning과 스테밍 충돌 → 거부
+    assert "let" not in srcs             # 스톱워드 → 거부
+
+
+def test_LLM_A엔트리_형태_검증():
+    """단일 title-case 일반어(Long·Model·to-end)는 A로 못 들어온다 —
+    전대문자·내부대문자·다단어 고유명사만 통과."""
+    from app.translate.glossary import build_glossary
+
+    class FakeClient:
+        def complete(self, system, user, *, max_tokens):
+            return ('[{"src":"long","ko":"Long","policy":"A"},'
+                    '{"src":"to-end","ko":"to-end","policy":"A"},'
+                    '{"src":"publaynet","ko":"PubLayNet","policy":"A"},'
+                    '{"src":"unlimited ocr","ko":"Unlimited OCR","policy":"A"}]')
+
+    md = ("It has a Long horizon. We add a Long window and a Long buffer. "
+          "It uses a PubLayNet split, trains on PubLayNet data, evals on PubLayNet too. "
+          "Also end to-end here, more to-end there, again to-end now. "
+          "See also Unlimited Ocr v1, an Unlimited Ocr v2, and Unlimited Ocr v3.\n")
+    g = build_glossary(md, [], FakeClient(), None)
+    a = {e.src: e.ko for e in g.entries if e.policy == "A"}
+    assert "publaynet" in a and "unlimited ocr" in a
+    assert "long" not in a and "to-end" not in a

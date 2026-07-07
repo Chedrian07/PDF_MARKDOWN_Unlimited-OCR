@@ -64,7 +64,9 @@ class MarkerClient(EchoClient):
 
 
 class FaultyClient(EchoClient):
-    """플레이스홀더를 떨어뜨림 → 재시도 후 원문 유지되어야 함."""
+    """플레이스홀더를 떨어뜨림 → 래더(repair·분할) 실패 시 원문 유지되어야 함.
+
+    repair 프롬프트엔 [번역할 원문] 마커가 없어 _marker가 None → 빈 응답(repair도 실패)."""
 
     def complete(self, system, user, *, max_tokens):
         self.calls += 1
@@ -73,6 +75,76 @@ class FaultyClient(EchoClient):
             return ""
         import re
         return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)
+
+
+def _repair_src(user: str) -> str | None:
+    """repair 프롬프트에서 마스킹 원문을 되뽑는다 (테스트용). 헤더는 한 줄 가정."""
+    if "[수정할 번역문]" not in user:
+        return None
+    head = user.split("[수정할 번역문]", 1)[0]          # "[원문 ...]\n{masked}\n\n"
+    parts = head.split("\n", 1)                          # 첫 줄(헤더) 분리
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+class RepairClient(EchoClient):
+    """최초 패스엔 태그 소실, repair 패스엔 원문(태그 포함) 복원 → step1에서 복구."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        rsrc = _repair_src(user)
+        if rsrc is not None:
+            return rsrc                                   # repair: 태그 그대로 살려 반환
+        src = _marker(user)
+        if src is None:
+            return ""
+        import re
+        return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)  # 최초: 태그 전부 소실
+
+
+class SplitClient(EchoClient):
+    """태그 2개↑면 전부 소실(전체·repair 실패), 1개↓면 보존(반쪽 성공) → step2 분할 복구."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        if _repair_src(user) is not None:
+            return ""                                     # repair 실패 유도
+        src = _marker(user)
+        if src is None:
+            return ""
+        import re
+        tags = re.findall(r"<[mkgucft]\d+\b[^>]*>", src)
+        if len(tags) >= 2:
+            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)  # 여러 태그 → 소실
+        return src                                        # 0~1개 → 보존(성공)
+
+
+class DelimiterClient(EchoClient):
+    """태그는 보존하되 모델 발명 딜리미터·<PAGE>를 섞음 → sanitize가 걷어내야 함."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        src = _marker(user)
+        if src is None:
+            return ""
+        return src + " \\(추가\\) $$없음$$ <PAGE>"
+
+
+class TableSplitClient(EchoClient):
+    """태그 20개↑ 유닛은 소실(전체·repair 실패), 미만은 보존 — 초대형 HTML 표가
+    </tr> 행 경계 분할(2a)로만 복구되는 실측 시나리오(6.4KB 표) 재현."""
+
+    def complete(self, system, user, *, max_tokens):
+        self.calls += 1
+        if _repair_src(user) is not None:
+            return ""  # repair 실패 유도
+        src = _marker(user)
+        if src is None:
+            return ""
+        import re
+        tags = re.findall(r"<[mkgucft]\d+\b[^>]*>", src)
+        if len(tags) >= 20:
+            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)
+        return src
 
 
 @pytest.fixture
@@ -93,6 +165,17 @@ def job(tmp_path):
 
 def _state(job) -> dict:
     return json.loads((job / "translations" / "ko" / "state.json").read_text(encoding="utf-8"))
+
+
+def _report(job) -> dict:
+    return json.loads((job / "translations" / "ko" / "report.json").read_text(encoding="utf-8"))
+
+
+def _run_md(tmp_path, cfg, md, client):
+    """layout 없이 result.md만 두고 번역 → (result, report, result.ko.md 텍스트)."""
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    res = run_translation(tmp_path, "ko", cfg, client=client)
+    return res, _report(tmp_path), (tmp_path / "result.ko.md").read_text(encoding="utf-8")
 
 
 def test_echo_결과_바이트동일_및_레이아웃_content동일(job, cfg):
@@ -193,3 +276,67 @@ def test_layout_없어도_동작(tmp_path, cfg):
     assert res.status == "done"
     assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == RESULT_MD
     assert not (tmp_path / "layout.ko.json").exists()
+
+
+# ── 신뢰도 래더 (kept_original → 0) ─────────────────────────────────────────
+
+def test_래더_repair로_복구_kept0(tmp_path, cfg):
+    """(a) 최초 태그 소실 → repair 패스 성공 → translated, report.repaired==1, kept 0."""
+    md = "# Title\n\nThe loss $L$ is minimized during the training here.\n"
+    res, report, _ = _run_md(tmp_path, cfg, md, RepairClient())
+    assert res.status == "done"
+    assert res.kept_original == []
+    assert report["repaired"] == 1 and report["retried"] >= 1 and report["split"] == 0
+
+
+def test_래더_분할로_복구_kept0(tmp_path, cfg):
+    """(b) 전체 실패(태그 2개 소실)·repair 실패 → 문장 분할로 반쪽씩 성공 → split==1."""
+    md = "The value $a$ is here. The value $b$ is there.\n"
+    res, report, md_out = _run_md(tmp_path, cfg, md, SplitClient())
+    assert res.status == "done"
+    assert res.kept_original == []
+    assert report["split"] == 1 and report["retried"] >= 1
+    assert "$a$" in md_out and "$b$" in md_out  # 두 수식 모두 복원
+
+
+def test_래더_구조유닛_분할안함_원문유지(tmp_path, cfg):
+    """(c) 표(구조 유닛)는 문장 경계가 있어도 분할하지 않는다 → kept_original."""
+    md = (
+        "| Description column | Result value here |\n"
+        "| --- | --- |\n"
+        "| First sentence. Second $E$ sentence here | plain data row |\n"
+    )
+    res, report, md_out = _run_md(tmp_path, cfg, md, FaultyClient())
+    assert res.status == "done"
+    assert "md:0:0" in res.kept_original      # 표 유닛 원문 유지
+    assert report["split"] == 0               # 분할 시도 자체 없음
+    assert "$E$" in md_out                    # 원문 수식 보존
+
+
+def test_래더_발명딜리미터_sanitize_제거(tmp_path, cfg):
+    """(d) 출력에 \\(x\\)·$$·<PAGE> 섞여도 최종 결과엔 딜리미터 없음 + sanitized>0."""
+    md = "The final result $R$ is good enough.\n"
+    res, report, md_out = _run_md(tmp_path, cfg, md, DelimiterClient())
+    assert res.status == "done"
+    assert res.kept_original == []            # 태그 보존돼 최초 패스 성공
+    assert report["sanitized"] > 0
+    for delim in ("\\(", "\\)", "\\[", "\\]", "$$", "<PAGE>"):
+        assert delim not in md_out
+    assert "$R$" in md_out                    # 실제 인라인 수식은 마스킹으로 보호돼 살아남음
+
+
+def test_초대형_표유닛은_행경계_분할로_복구(tmp_path, cfg):
+    """HTML 표는 문장 분할 대상이 아니다 — </tr> 행 경계 분할(2a)이 잡아야 한다.
+    전체(26태그)·repair 실패 → 반쪽(13태그) 성공 → 이어붙임이 원 구조와 동일."""
+    import json as _json
+
+    rows = "".join(f"<tr><td>row {i} data</td><td>value {i}</td></tr>" for i in range(4))
+    md = f"# Title\n\n<table>{rows}</table>\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+
+    res = run_translation(tmp_path, "ko", cfg, client=TableSplitClient())
+    assert res.kept_original == []
+    # Echo 기반이라 성공 경로는 원문 복원 — 표 구조가 바이트 그대로 살아야 한다
+    assert (tmp_path / "result.ko.md").read_text(encoding="utf-8") == md
+    rep = _json.loads((tmp_path / "translations" / "ko" / "report.json").read_text(encoding="utf-8"))
+    assert rep["split"] == 1

@@ -82,12 +82,20 @@ class OpenAICompatClient:
     def _build_payload(self, mode: str, system: str, user: str, max_tokens: int) -> dict:
         cfg = self.cfg
         temp_ok = cfg.temperature != "none"
+        # reasoning 제어 (opt-in — 미설정 시 파라미터 자체를 안 보내 구형 서버 호환 유지)
+        reasoning = None
+        if cfg.reasoning == "off":
+            reasoning = {"enabled": False}
+        elif cfg.reasoning in ("low", "medium", "high"):
+            reasoning = {"effort": cfg.reasoning}
         if mode == "responses":
             p: dict = {"model": cfg.model, "instructions": system, "input": user}
             if temp_ok:
                 p["temperature"] = float(cfg.temperature)
             if cfg.max_tokens_param != "none":
                 p["max_output_tokens"] = max_tokens
+            if reasoning is not None:
+                p["reasoning"] = reasoning
             return p
         p = {
             "model": cfg.model,
@@ -102,6 +110,8 @@ class OpenAICompatClient:
             p["max_tokens"] = max_tokens
         elif cfg.max_tokens_param == "max_completion_tokens":
             p["max_completion_tokens"] = max_tokens
+        if reasoning is not None:
+            p["reasoning"] = reasoning
         return p
 
     def _send(self, mode: str, system: str, user: str, max_tokens: int, allow_fallback: bool) -> str:

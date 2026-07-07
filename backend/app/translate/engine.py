@@ -18,12 +18,63 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+import re
+
 from . import prompts
 from .client import OpenAICompatClient
 from .glossary import Glossary, build_glossary
-from .masking import mask, should_skip, unmask
+from .masking import mask, sanitize_translation, should_skip, unmask
 from .segment import apply_layout, assemble_markdown, layout_units, split_markdown
 from .types import PROMPT_V, TranslateConfig, TranslateError, TranslateResult, cache_key
+
+# 문장 경계 — 종결부호 뒤 공백. 분할 지점·분할 가능 판정에 함께 쓴다.
+_SENT_BOUND_RE = re.compile(r"(?<=[.!?…])\s+")
+# 구조 유닛 감지 — 줄 시작이 표(|)·목록(-, *)·인용(>)·번호목록(숫자.)·펜스(```)인 줄.
+_STRUCT_LINE_RE = re.compile(r"^\s*(?:[|>*-]|\d+\.|```)")
+
+
+def _splittable(src: str) -> bool:
+    """문장 분할 재시도 대상인가 — 여러 문장이고 구조 유닛(표·목록·인용·펜스)이 아니면 True."""
+    if not _SENT_BOUND_RE.search(src):
+        return False  # 문장 경계가 없으면 나눌 수 없다
+    return not any(_STRUCT_LINE_RE.match(ln) for ln in src.split("\n"))
+
+
+def _split_two(src: str) -> tuple[str, str] | None:
+    """문장 경계 중 중앙에 가장 가까운 지점에서 2분할. (앞, 뒤) 또는 None(경계 없음/한쪽 공백)."""
+    bounds = [m.end() for m in _SENT_BOUND_RE.finditer(src)]
+    if not bounds:
+        return None
+    mid = len(src) / 2
+    cut = min(bounds, key=lambda b: abs(b - mid))
+    left, right = src[:cut].rstrip(), src[cut:].lstrip()
+    if not left or not right:
+        return None
+    return left, right
+
+
+# HTML 표 유닛 — 문장 분할 대신 행(</tr>) 경계에서 자른다. 초대형 표(실측 6.4KB,
+# 플레이스홀더 수십 개)는 한 번에 번역·repair가 모두 실패하는 유일한 유형이었다.
+_TABLE_ROW_END_RE = re.compile(r"</tr\s*>", re.I)
+
+
+def _is_table_unit(src: str) -> bool:
+    return src.lstrip().lower().startswith("<table")
+
+
+def _split_table(src: str) -> tuple[str, str] | None:
+    """`</tr>` 경계 중 중앙에 가장 가까운 지점에서 2분할. 재결합은 단순 이어붙임 —
+    행 사이 공백은 HTML 렌더에 무의미하므로 구조가 정확히 보존된다."""
+    bounds = [m.end() for m in _TABLE_ROW_END_RE.finditer(src)]
+    if len(bounds) < 2:
+        return None  # 행이 하나뿐이면 나눠도 의미 없음
+    mid = len(src) / 2
+    # 마지막 </tr> 뒤에서 자르면 오른쪽이 </table>뿐이 된다 — 마지막 경계는 제외
+    cut = min(bounds[:-1], key=lambda b: abs(b - mid))
+    left, right = src[:cut], src[cut:]
+    if not left.strip() or not right.strip():
+        return None
+    return left, right
 
 
 def _now() -> str:
@@ -149,33 +200,120 @@ def run_translation(
         kept_original: list[str] = []
         translated_n = 0
         cached_n = 0
-        retried_n = 0
+        retried_n = 0    # 최초 패스 실패로 래더(repair/분할)에 진입한 유닛 수
+        repaired_n = 0   # repair 패스로 복구된 유닛 수
+        split_n = 0      # 문장 분할로 복구된 유닛 수
+        sanitized_n = 0  # sanitize 치환 총건수 (모든 complete 출력 경로 합산)
+
+        def _max_toks(masked: str) -> int:
+            return min(8000, max(384, len(masked) // 2 + 300))
+
+        def _run_pass(prompt: str, max_toks: int, mapping: dict) -> tuple[str, list, list, int, str]:
+            """complete → sanitize → unmask 한 번. (복원문, missing, dup, 치환건수, 정리된_원출력)."""
+            raw = client.complete(prompts.SYSTEM_TRANSLATE, prompt, max_tokens=max_toks)
+            clean, sc = sanitize_translation(raw)
+            restored, missing, dup = unmask(clean, mapping)
+            return restored, missing, dup, sc, clean
+
+        def _translate_fragment(src, pairs, first, ctx, stats, keep=None) -> str | None:
+            """분할된 반쪽 하나를 독립 번역 — mask→complete→sanitize→unmask + repair 1회(추가 분할 없음).
+
+            성공 시 복원문, 실패 시 None. sanitize 건수만 stats에 누적한다. 반쪽 단계의
+            API 오류는 무손실 원칙상 치명적이지 않으므로 None 처리(원 유닛 원문 유지로 귀결)."""
+            masked, mapping = mask(src)
+            max_toks = _max_toks(masked)
+            prompt = prompts.build_unit_prompt(masked, pairs, first, context_tail=ctx, keep_terms=keep)
+            try:
+                restored, missing, dup, sc, clean = _run_pass(prompt, max_toks, mapping)
+            except TranslateError:
+                return None
+            stats["sanitized"] += sc
+            if not missing and not dup and restored.strip():
+                return restored
+            try:
+                rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
+                r_restored, r_missing, r_dup, r_sc, _ = _run_pass(rprompt, max_toks, mapping)
+                stats["sanitized"] += r_sc
+                if not r_missing and not r_dup and r_restored.strip():
+                    return r_restored
+            except TranslateError:
+                pass
+            return None
 
         def translate_unit(u):
             masked, mapping = mask(u.src)
             pairs, first = glossary.for_unit(u.src, u.id)
-            key = cache_key(masked, cfg.model, pairs + first)
+            keep = glossary.keep_terms(u.src)
+            # keep(A 원형)도 출력 정책을 바꾸므로 캐시 키에 포함 — (k, k) 쌍으로 해시
+            key = cache_key(masked, cfg.model, pairs + first + [(k, k) for k in keep])
+            stats = {"retried": 0, "repaired": 0, "split": 0, "sanitized": 0}
             if not force and key in cache:
-                return u, cache[key], "cached", key, False
+                return u, cache[key], "cached", key, stats
             ctx = context_map.get(u.id) if cfg.context else None
-            prompt = prompts.build_unit_prompt(masked, pairs, first, context_tail=ctx)
-            max_toks = min(8000, max(384, len(masked) // 2 + 300))
-            out = client.complete(prompts.SYSTEM_TRANSLATE, prompt, max_tokens=max_toks)
-            restored, missing, dup = unmask(out, mapping)
-            if missing or dup:
-                # 플레이스홀더 소실 → 강조 지시 붙여 1회 재시도
-                suffix = prompts.build_retry_suffix(missing + dup)
-                try:
-                    out2 = client.complete(prompts.SYSTEM_TRANSLATE, prompt + suffix, max_tokens=max_toks)
-                    restored2, missing2, dup2 = unmask(out2, mapping)
-                    if not missing2 and not dup2 and restored2.strip():
-                        return u, restored2, "translated", key, True
-                except TranslateError:
-                    pass
-                return u, u.src, "kept", key, True  # 원문 유지
-            if not restored.strip():
-                return u, u.src, "kept", key, False
-            return u, restored, "translated", key, False
+            max_toks = _max_toks(masked)
+            prompt = prompts.build_unit_prompt(masked, pairs, first, context_tail=ctx, keep_terms=keep)
+
+            # 0) 최초 패스 — complete→sanitize→unmask. 태그 완전하면 즉시 성공.
+            #    (step 0의 API 오류는 잡 전체 실패로 전파 — 기존 계약 유지)
+            restored, missing, dup, sc, clean = _run_pass(prompt, max_toks, mapping)
+            stats["sanitized"] += sc
+            if not missing and not dup and restored.strip():
+                return u, restored, "translated", key, stats
+
+            # 여기부터 신뢰도 래더 — 태그 누락·중복 또는 빈 출력
+            stats["retried"] = 1
+
+            # 1) repair 패스 — 원문(태그 포함)+깨진 번역문을 주고 태그만 바로잡게 한다.
+            try:
+                rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
+                r_restored, r_missing, r_dup, r_sc, _ = _run_pass(rprompt, max_toks, mapping)
+                stats["sanitized"] += r_sc
+                if not r_missing and not r_dup and r_restored.strip():
+                    stats["repaired"] = 1
+                    return u, r_restored, "translated", key, stats
+            except TranslateError:
+                pass
+
+            # 2a) HTML 표 유닛 — </tr> 행 경계 분할 (깊이 2 = 최대 4분할).
+            #     초대형 표는 반쪽도 실패할 수 있어 재귀 한 단계를 더 허용한다.
+            if _is_table_unit(u.src):
+                def _table_part(src: str, depth: int) -> str | None:
+                    got = _translate_fragment(src, pairs, first, None, stats, keep)
+                    if got is not None or depth <= 0:
+                        return got
+                    sub = _split_table(src)
+                    if sub is None:
+                        return None
+                    a = _table_part(sub[0], depth - 1)
+                    if a is None:
+                        return None
+                    b = _table_part(sub[1], depth - 1)
+                    return None if b is None else a + b
+
+                ts = _split_table(u.src)
+                if ts is not None:
+                    left = _table_part(ts[0], 1)
+                    right = _table_part(ts[1], 1) if left is not None else None
+                    if left is not None and right is not None:
+                        stats["split"] = 1
+                        return u, left + right, "translated", key, stats
+
+            # 2b) 문장 분할 재시도(깊이 1) — 여러 문장·비구조 유닛만. 양쪽 성공 시 " "로 결합.
+            elif _splittable(u.src):
+                halves = _split_two(u.src)
+                if halves is not None:
+                    left_src, right_src = halves
+                    left = _translate_fragment(left_src, pairs, first, ctx, stats, keep)
+                    if left is not None:
+                        # 뒷반 컨텍스트: 앞반 src의 꼬리 200자 (컨텍스트 비활성 시 생략)
+                        right_ctx = left_src[-200:] if cfg.context else None
+                        right = _translate_fragment(right_src, pairs, first, right_ctx, stats, keep)
+                        if right is not None:
+                            stats["split"] = 1
+                            return u, left + " " + right, "translated", key, stats
+
+            # 3) 최종 실패 → 원문 유지 (무손실 원칙 불변)
+            return u, u.src, "kept", key, stats
 
         # 취소: 디스패치 전 선체크
         if cancel is not None and cancel.is_set():
@@ -203,10 +341,12 @@ def run_translation(
                         for f in futures:
                             f.cancel()
                         break
-                    u, text, status, key, was_retried = fut.result()
+                    u, text, status, key, stats = fut.result()
                     results[u.id] = text
-                    if was_retried:
-                        retried_n += 1
+                    retried_n += stats["retried"]
+                    repaired_n += stats["repaired"]
+                    split_n += stats["split"]
+                    sanitized_n += stats["sanitized"]
                     if status == "cached":
                         cached_n += 1
                     elif status == "translated":
@@ -246,6 +386,9 @@ def run_translation(
         _atomic_write_json(tdir / "report.json", {
             "kept_original": kept_original,
             "retried": retried_n,
+            "repaired": repaired_n,
+            "split": split_n,
+            "sanitized": sanitized_n,
             "skipped": skipped,
             "cached": cached_n,
             "translated": translated_n,

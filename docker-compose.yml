@@ -44,6 +44,7 @@ services:
       TRANSLATE_MAX_RETRIES: ${TRANSLATE_MAX_RETRIES:-3}
       TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
       TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
+      TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
     volumes:
       - ocr-data:/data
       - hf-cache:/data/hf
@@ -87,6 +88,7 @@ services:
       TRANSLATE_MAX_RETRIES: ${TRANSLATE_MAX_RETRIES:-3}
       TRANSLATE_TEMPERATURE: ${TRANSLATE_TEMPERATURE:-0}
       TRANSLATE_MAX_TOKENS_PARAM: ${TRANSLATE_MAX_TOKENS_PARAM:-max_tokens}
+      TRANSLATE_REASONING: ${TRANSLATE_REASONING:-}
     volumes:
       - ocr-data:/data
       - hf-cache:/data/hf

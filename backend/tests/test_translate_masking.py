@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.translate.masking import mask, should_skip, unmask
+from app.translate.masking import mask, sanitize_translation, should_skip, unmask
 
 
 def _roundtrip(text: str) -> tuple[str, list, list]:
@@ -78,6 +78,35 @@ def test_잔여_플레이스홀더_dup():
     assert any("m9" in d for d in dup)
 
 
+def test_sanitize_수식딜리미터_치환_카운트():
+    clean, n = sanitize_translation("번역 \\(a\\) 그리고 \\[b\\] 끝")
+    assert clean == "번역 (a) 그리고 [b] 끝"
+    assert n == 4  # \( \) \[ \]
+
+
+def test_sanitize_이중달러_페이지마커_제거():
+    clean, n = sanitize_translation("앞 $$수식$$ 여기 <PAGE> 뒤")
+    assert "$$" not in clean and "<PAGE>" not in clean
+    assert "수식" in clean and "앞" in clean and "뒤" in clean
+    assert n == 3  # $$ 2건 + <PAGE> 1건
+
+
+def test_sanitize_치환없으면_무변화_0건():
+    text = "일반 번역문에는 $단일$ 달러와 \\sum 같은 게 있어도 무관하다."
+    clean, n = sanitize_translation(text)
+    assert clean == text and n == 0  # 단일 $, \sum(\s)은 대상 아님
+
+
+def test_sanitize_플레이스홀더_v속성_치환돼도_복원_무해():
+    # v 미리보기 안에 \( \)가 들어간 실제 마스킹 출력을 그대로 새니타이즈
+    masked, mapping = mask("see \\( a \\) end")
+    clean, n = sanitize_translation(masked)
+    assert n == 0  # v 속성 안의 \( \)는 치환은 되지만 카운트하지 않는다 (리포트 부풀림 방지)
+    restored, missing, dup = unmask(clean, mapping)
+    assert restored == "see \\( a \\) end"  # 원문 그대로 복원 (id 매칭이라 v 치환 무해)
+    assert not missing and not dup
+
+
 def test_should_skip_수식뿐():
     assert should_skip("$E = mc^2$") == "non-linguistic"
     assert should_skip("[1, 2, 3]") == "non-linguistic"
@@ -96,3 +125,15 @@ def test_should_skip_번역대상():
     assert should_skip("This is a normal English sentence about models.") == ""
     # 수식 섞였어도 자연어가 있으면 번역 대상
     assert should_skip("The loss is $L = \\sum x$ over samples.") == ""
+
+
+def test_should_skip_참고문헌_모양감지():
+    """헤딩 없는 참고문헌(실측 2504.19874v1: 헤딩이 markdown으로 안 뽑힘)도
+    [n] 항목 모양으로 스킵한다 — md·layout 유닛 공통 경로."""
+    multi = "[41] Liu, Z., and Hu, X. Kivi: KV cache quantization. 2024.\n[42] Kim, J. Paper title. arXiv:2401.00001."
+    assert should_skip(multi) == "references"
+    single = "[26] Gersho, A. On the structure of vector quantizers. IEEE Trans., 28(2):157-166, 1982."
+    assert should_skip(single) == "references"
+    # 본문이 인용으로 시작하는 산문은 스킵하면 안 됨 (서지 증거 없음)
+    prose = "[1] shows that the method improves accuracy over strong baselines."
+    assert should_skip(prose) == ""

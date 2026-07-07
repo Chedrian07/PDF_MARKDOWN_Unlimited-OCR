@@ -22,7 +22,9 @@ from dataclasses import dataclass, field
 
 # 프롬프트/마스킹 규칙 개정 시 올린다 → 캐시 키가 바뀌어 자동 재번역 (fonts_v 패턴)
 # v2: 문체 few-shot 예시 추가 (4B급 모델 합쇼체 이탈 실측 → 예시로 0건)
-PROMPT_V = "2"
+# v3: 신뢰도 래더(sanitize+repair+분할) + 규칙5 인명 음차 금지 강화 → kept_original 감소
+# v4: [원문 유지] 유닛별 A-용어 목록(MSE 풀어쓰기 실측 차단) + 용어 매칭 수식 제외 + 스톱워드
+PROMPT_V = "4"
 
 SUPPORTED_LANGS = ("ko",)
 
@@ -52,6 +54,10 @@ class TranslateConfig:
     temperature: str = "0"  # "none"이면 파라미터 생략
     max_tokens_param: str = "max_tokens"  # max_tokens | max_completion_tokens | none
     context: bool = True  # 직전 유닛 꼬리를 참고 컨텍스트로 프롬프트에 포함
+    # reasoning 모델 제어 (OpenRouter 통합 파라미터): "" = 파라미터 미전송(호환 기본),
+    # off = {"enabled": false}, low|medium|high = {"effort": ...}.
+    # 실측(qwen3.7-plus): off가 유닛당 37s→1.7s, 출력 토큰 ~1/40 — 번역엔 reasoning 불필요.
+    reasoning: str = ""
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "TranslateConfig":
@@ -71,6 +77,9 @@ class TranslateConfig:
             raise TranslateError(
                 "TRANSLATE_MAX_TOKENS_PARAM은 max_tokens|max_completion_tokens|none 중 하나여야 합니다"
             )
+        reasoning = (_clean(e.get("TRANSLATE_REASONING")) or "").lower()
+        if reasoning not in ("", "off", "low", "medium", "high"):
+            raise TranslateError("TRANSLATE_REASONING은 off|low|medium|high 또는 빈 값이어야 합니다")
         return cls(
             base_url=base_url,
             api_key=_clean(e.get("OPENAI_API_KEY")),
@@ -82,6 +91,7 @@ class TranslateConfig:
             temperature=(_clean(e.get("TRANSLATE_TEMPERATURE")) or "0").lower(),
             max_tokens_param=mt_param,
             context=(_clean(e.get("TRANSLATE_CONTEXT")) or "1") not in ("0", "false", "no"),
+            reasoning=reasoning,
         )
 
 
