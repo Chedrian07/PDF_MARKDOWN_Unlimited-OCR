@@ -379,6 +379,7 @@ const EL_IDS = {
   resultSection: 'result-section',
   dlMd: 'dl-md',
   dlZip: 'dl-zip',
+  dlLayout: 'dl-layout',
   previewBody: 'preview-body',
   doclayoutBody: 'doclayout-body',
   mdCode: 'md-code',
@@ -1359,6 +1360,7 @@ async function onJobDone(id, data) {
     const base = 'document';
     setDownload(el.dlMd, data.markdown_url, `${base}.md`);
     setDownload(el.dlZip, data.archive_url, `${base}.md.zip`);
+    setDownload(el.dlLayout, `/api/jobs/${state.currentJobId}/layout.html`, `${base}.layout.html`);
     renderThumbGrid(el.layoutsGrid, [], '레이아웃 이미지를 불러오지 못했습니다.');
     renderThumbGrid(el.pagesGrid, [], '페이지 이미지를 불러오지 못했습니다.');
     state.previewLoaded = false;
@@ -1421,6 +1423,7 @@ function renderResult(job) {
   const base = baseName(job.filename);
   setDownload(el.dlMd, r.markdown_url, `${base}.md`);
   setDownload(el.dlZip, r.archive_url, `${base}.md.zip`);
+  setDownload(el.dlLayout, `/api/jobs/${job.job_id}/layout.html`, `${base}.layout.html`);
 
   renderThumbGrid(el.layoutsGrid, r.layouts, '레이아웃 이미지가 없습니다.');
   renderThumbGrid(el.pagesGrid, r.pages, '원본 페이지 이미지가 없습니다.');
@@ -1442,6 +1445,7 @@ function renderPartialResult(job) {
   const base = baseName(job.filename);
   setDownload(el.dlMd, `/api/jobs/${id}/markdown`, `${base}.partial.md`);
   setDownload(el.dlZip, null); // archive returns 409 for unfinished jobs
+  setDownload(el.dlLayout, `/api/jobs/${id}/layout.html`, `${base}.layout.html`); // 부분 레이아웃도 유효
 
   renderThumbGrid(el.layoutsGrid, [], '취소된 작업에는 레이아웃 이미지가 제공되지 않습니다.');
   renderThumbGrid(el.pagesGrid, [], '취소된 작업에는 원본 페이지 목록이 제공되지 않습니다.');
@@ -1516,6 +1520,7 @@ async function loadDocLayout() {
   state.docLayoutLoaded = true;
   // Trusted server-rendered fragment (pipeline/layout.py — 텍스트 전부 이스케이프됨).
   el.doclayoutBody.innerHTML = html;
+  typesetMath(el.doclayoutBody);
 }
 
 async function loadPreview() {

@@ -17,9 +17,13 @@ from __future__ import annotations
 
 import re
 
+import base64
+import functools
+from pathlib import Path
+
 from markdown_it.common.utils import escapeHtml
 
-from .render import _restore_table_tags
+from .render import _restore_table_tags, text_with_math_html
 
 # 벤더 re_match와 동일한 두 그라운딩 문법
 _REF_BLOCK = re.compile(r"<\|ref\|>(.{1,40}?)<\|/ref\|><\|det\|>(.{0,400}?)<\|/det\|>", re.DOTALL)
@@ -84,8 +88,9 @@ def _pct(v: int) -> str:
     return f"{v / 999 * 100:.2f}"
 
 
-def render_layout_html(pages: list[dict], files_base_url: str) -> str:
-    """layout.json(merge가 통합한 페이지 블록들) → 절대 배치 HTML 프래그먼트."""
+def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -> str:
+    """layout.json(merge가 통합한 페이지 블록들) → 절대 배치 HTML 프래그먼트.
+    image_src(name)->str 을 주면 이미지 src를 그 값으로 (standalone의 data URI용)."""
     sections: list[str] = []
     for p in pages:
         width = p.get("width") or 1000
@@ -106,12 +111,14 @@ def render_layout_html(pages: list[dict], files_base_url: str) -> str:
                 btype = "text"
             image_name = b.get("image")
             if image_name and re.fullmatch(r"[\w.-]+", str(image_name)):
+                src = image_src(image_name) if image_src else f"{files_base_url}/images/{image_name}"
                 blocks_html.append(
                     f'<img class="layout-block layout-image" '
-                    f'src="{files_base_url}/images/{image_name}" style="{style}" alt="">'
+                    f'src="{src}" style="{style}" alt="">'
                 )
                 continue
-            content = escapeHtml(str(b.get("content") or ""))
+            # 이스케이프 + \(..\)/\[..\] 구간은 KaTeX 스팬으로 (클라이언트가 타이포셋)
+            content = text_with_math_html(str(b.get("content") or ""))
             if btype == "table":
                 content = _restore_table_tags(content)
             blocks_html.append(
@@ -125,3 +132,79 @@ def render_layout_html(pages: list[dict], files_base_url: str) -> str:
             + "</div></section>"
         )
     return "\n".join(sections)
+
+
+# ── standalone HTML (다운로드용 단일 파일 — PDF 대응 뷰) ─────────────────
+# frontend/styles.css의 .layout-* 규칙과 시각적으로 동기 유지할 것.
+_STANDALONE_CSS = """
+:root { color-scheme: light; }
+* { box-sizing: border-box; margin: 0; }
+body { background: #eceef2; font-family: system-ui, -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; padding: 24px 12px; }
+.doclayout-body { display: grid; gap: 26px; max-width: 900px; margin-inline: auto; }
+.layout-page::before { content: "페이지 " attr(data-page); display: block; font-size: 11px; color: #666; margin-bottom: 4px; }
+.layout-canvas { position: relative; width: 100%; height: 0; background: #fff; border: 1px solid #d5d7dd; border-radius: 6px; box-shadow: 0 1px 5px rgba(0,0,0,.1); overflow: hidden; }
+.layout-block { position: absolute; overflow: hidden; font-size: 11px; line-height: 1.35; color: #1a1c22; padding: 1px 3px; }
+.layout-title { font-weight: 700; font-size: 14px; color: #b0262c; }
+.layout-image { object-fit: contain; padding: 0; }
+.layout-table { font-size: 9px; }
+.layout-table table { border-collapse: collapse; width: 100%; }
+.layout-table td, .layout-table th { border: 1px solid #c9c9d4; padding: 1px 3px; }
+.layout-formula, .layout-equation { font-size: 11px; display: flex; align-items: center; justify-content: center; }
+.layout-page_number, .layout-header, .layout-footer, .layout-footnote { opacity: .45; font-size: 9px; }
+.layout-block .math-display { display: block; text-align: center; }
+@media print { body { background: #fff; padding: 0; } .layout-page { break-inside: avoid; } }
+"""
+
+_TYPESET_JS = (
+    "document.querySelectorAll('.math-inline,.math-display').forEach(function(e){"
+    "try{katex.render(e.textContent,e,{displayMode:e.classList.contains('math-display'),"
+    "throwOnError:false});}catch(_){}});"
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _katex_inline_bundle(frontend_dir_str: str) -> str:
+    """벤더 KaTeX css(woff2 폰트 data-URI 인라인)+js — 단일 파일 배포용.
+    자산이 없으면 빈 문자열 (수식은 원문 LaTeX 표기로 폴백)."""
+    fd = Path(frontend_dir_str) / "vendor" / "katex"
+    css_p, js_p = fd / "katex.min.css", fd / "katex.min.js"
+    if not css_p.is_file() or not js_p.is_file():
+        return ""
+
+    def _font(m: re.Match) -> str:
+        p = fd / m.group(1)
+        if p.is_file() and p.suffix == ".woff2":
+            b64 = base64.b64encode(p.read_bytes()).decode()
+            return f"url(data:font/woff2;base64,{b64})"
+        return "url(data:,)"  # woff/ttf 미벤더 — 브라우저는 woff2를 우선 선택
+
+    css = re.sub(r"url\((fonts/[^)]+)\)", _font, css_p.read_text(encoding="utf-8"))
+    js = js_p.read_text(encoding="utf-8")
+    return (
+        f"<style>{css}</style><script>{js}</script>"
+        f"<script>window.addEventListener('DOMContentLoaded',function(){{{_TYPESET_JS}}});</script>"
+    )
+
+
+def render_layout_standalone(
+    pages: list[dict], job_dir: Path, title: str, frontend_dir: Path | None
+) -> str:
+    """이미지 base64·KaTeX 인라인의 완전 자립형 HTML 문서 — 오프라인에서 그대로 열림."""
+
+    def _inline_image(name: str) -> str:
+        p = job_dir / "images" / name
+        try:
+            b64 = base64.b64encode(p.read_bytes()).decode()
+            return f"data:image/jpeg;base64,{b64}"
+        except OSError:
+            return "data:,"  # 결측 크롭 — 빈 이미지로 폴백
+
+    body = render_layout_html(pages, files_base_url="", image_src=_inline_image)
+    katex = _katex_inline_bundle(str(frontend_dir)) if frontend_dir else ""
+    return (
+        '<!doctype html>\n<html lang="ko">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{escapeHtml(title)}</title>\n"
+        f"<style>{_STANDALONE_CSS}</style>\n{katex}\n</head>\n"
+        f'<body><main class="doclayout-body">\n{body}\n</main></body>\n</html>\n'
+    )

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 
 from . import native_ops
 from .pipeline.pdf import probe_pdf
-from .pipeline.layout import render_layout_html
+from .pipeline.layout import render_layout_html, render_layout_standalone
 from .pipeline.render import render_document_html, render_markdown_html
 
 router = APIRouter(prefix="/api")
@@ -210,19 +210,44 @@ def job_html(request: Request, job_id: str) -> HTMLResponse:
     return HTMLResponse(html, headers=headers)
 
 
-@router.get("/jobs/{job_id}/layout")
-def job_layout(request: Request, job_id: str) -> HTMLResponse:
-    """좌표 기반 레이아웃 뷰(Phase B) — layout.json이 있는 잡만 (없으면 404).
-    다단·절대 위치를 best-effort로 재구성한 부가 뷰. 마크다운 뷰와 독립."""
-    job = _get_job(request, job_id)
+def _load_layout_pages(job) -> list:
     p = job.dir / "layout.json"
     if not p.is_file():
         raise HTTPException(404, "레이아웃 데이터가 없습니다")
     try:
         pages = json.loads(p.read_text(encoding="utf-8"))
         assert isinstance(pages, list)
+        return pages
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, "레이아웃 데이터를 읽을 수 없습니다") from e
+
+
+@router.get("/jobs/{job_id}/layout.html")
+def job_layout_download(request: Request, job_id: str) -> HTMLResponse:
+    """PDF 대응 standalone HTML 다운로드 — 이미지 base64·KaTeX 인라인 단일 파일."""
+    from urllib.parse import quote
+
+    job = _get_job(request, job_id)
+    pages = _load_layout_pages(job)
+    st = _state(request)
+    html = render_layout_standalone(
+        pages, job.dir, Path(job.filename).stem or "document",
+        st.settings.resolve_frontend_dir(),
+    )
+    fname = f"{Path(job.filename).stem or 'document'}.layout.html"
+    return HTMLResponse(html, headers={
+        "Content-Disposition": f"attachment; filename=\"document.layout.html\"; filename*=UTF-8''{quote(fname)}",
+    })
+
+
+@router.get("/jobs/{job_id}/layout")
+def job_layout(request: Request, job_id: str) -> HTMLResponse:
+    """좌표 기반 레이아웃 뷰(Phase B) — layout.json이 있는 잡만 (없으면 404).
+    다단·절대 위치를 best-effort로 재구성한 부가 뷰. 마크다운 뷰와 독립."""
+    job = _get_job(request, job_id)
+    pages = _load_layout_pages(job)
     return HTMLResponse(render_layout_html(pages, f"/api/jobs/{job_id}/files"))
 
 

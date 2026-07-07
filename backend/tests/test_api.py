@@ -62,12 +62,21 @@ def test_full_flow_multi(client, sample_pdf):
     assert html.text.count('<section class="doc-page"') == 3
     assert 'data-page="3"' in html.text
 
-    # 좌표 레이아웃 뷰 (Phase B): 페이지 섹션 + 글로벌 이미지 배치
+    # 좌표 레이아웃 뷰 (Phase B): 페이지 섹션 + 글로벌 이미지 배치 + 수식 스팬
     layout = client.get(f"/api/jobs/{jid}/layout")
     assert layout.status_code == 200
     assert layout.text.count('<section class="layout-page"') == 3
     assert f'src="/api/jobs/{jid}/files/images/p0001_0.jpg"' in layout.text
     assert "layout-title" in layout.text
+    assert '<span class="math-inline">E = mc^2</span>' in layout.text
+
+    # standalone HTML 다운로드: 자립형(이미지 base64), attachment 헤더
+    dl = client.get(f"/api/jobs/{jid}/layout.html")
+    assert dl.status_code == 200
+    assert "attachment" in dl.headers["content-disposition"]
+    assert dl.text.startswith("<!doctype html>")
+    assert "data:image/jpeg;base64," in dl.text
+    assert f"/api/jobs/{jid}" not in dl.text  # 서버 참조 없는 완전 자립 파일
 
     img = client.get(res["images"][0])
     assert img.status_code == 200

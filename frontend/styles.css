@@ -945,3 +945,7 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 .layout-table td, .layout-table th { border: 1px solid #c9c9d4; padding: 1px 3px; color: #1a1c22; }
 .layout-formula, .layout-equation { font-family: var(--mono); font-size: 10px; color: #8a5200; }
 .layout-page_number, .layout-header, .layout-footer, .layout-footnote { opacity: 0.45; font-size: 9px; }
+
+/* 레이아웃 블록 내 KaTeX 수식 */
+.layout-block .math-display { display: block; text-align: center; }
+.layout-formula, .layout-equation { display: flex; align-items: center; justify-content: center; }

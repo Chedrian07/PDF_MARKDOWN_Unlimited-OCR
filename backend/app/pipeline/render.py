@@ -95,6 +95,27 @@ def _normalize_math_delimiters(md_text: str) -> str:
     return md_text
 
 
+# ── 플레인 텍스트 + 수식 스팬 (마크다운이 아닌 문맥용 — 레이아웃 뷰 등) ──
+_MATH_ANY = re.compile(r"\\\[(.+?)\\\]|\\\((.+?)\\\)", re.DOTALL)
+
+
+def text_with_math_html(text: str) -> str:
+    """플레인 텍스트를 전부 이스케이프하되 `\\(..\\)`/`\\[..\\]` 구간은
+    KaTeX 대상 `.math-inline`/`.math-display` 스팬으로 변환한다."""
+    out: list[str] = []
+    pos = 0
+    for m in _MATH_ANY.finditer(text):
+        out.append(escapeHtml(text[pos:m.start()]))
+        display_tex, inline_tex = m.group(1), m.group(2)
+        tex = (display_tex if display_tex is not None else inline_tex).strip()
+        if tex:
+            cls = "math-display" if display_tex is not None else "math-inline"
+            out.append(f'<span class="{cls}">{escapeHtml(tex)}</span>')
+        pos = m.end()
+    out.append(escapeHtml(text[pos:]))
+    return "".join(out)
+
+
 # ── figure 상대 폭 주입 (렌더 후처리 — result.md/원문 불변) ───────────
 # 벤더 P13이 export한 boxes.json(픽셀 bbox + 페이지 크기)으로 각 figure를
 # 원본 페이지 대비 상대 폭으로 표시. 값은 전부 서버가 계산한 숫자라 안전하다.

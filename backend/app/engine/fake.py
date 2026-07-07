@@ -100,7 +100,7 @@ class FakeEngine(OCREngine):
         raw = (
             f"<|det|>title [60, 30, 700, 80]<|/det|>페이지 {page_idx + 1} — {image_path.stem}\n"
             f"<|det|>image [{nx1}, {ny1}, {nx2}, {ny2}]<|/det|>\n"
-            f"<|det|>text [60, 620, 930, 820]<|/det|>본문 텍스트 예시입니다. FakeEngine 레이아웃 블록."
+            f"<|det|>text [60, 620, 930, 820]<|/det|>본문 텍스트 예시입니다. 수식 \\( E = mc^2 \\) 포함."
         )
         return md, raw
 
