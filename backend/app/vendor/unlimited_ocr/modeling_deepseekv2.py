@@ -1296,13 +1296,14 @@ class SlidingWindowLlamaAttention(LlamaAttention):
             k = _llama_repeat_kv(key_states, num_kv_groups)
             v = _llama_repeat_kv(value_states, num_kv_groups)
 
-            attn_weights = torch.matmul(query_states, k.transpose(2, 3)) / math.sqrt(head_dim)
-            if attention_mask is not None:
-                causal_mask = attention_mask[:, :, :, :k.shape[-2]]
-                attn_weights = attn_weights + causal_mask
-            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            attn_output = torch.matmul(attn_weights, v)
+            # [vendor patch P16] prefill/warmup 어텐션을 SDPA 융합 커널로 교체 — MPS/CUDA에서
+            # [b,h,q,kv] 어텐션 행렬의 fp32 물질화와 다중 커널 디스패치를 제거한다. causal_mask는
+            # 가산 float 마스크(0/-inf)이므로 attn_mask로 그대로 전달 → 수치 등가(내부 fp32 softmax).
+            # 스케일은 원본과 동일(1/sqrt(head_dim)). 드롭아웃은 eval(training=False)에서 no-op.
+            attn_mask = attention_mask[:, :, :, :k.shape[-2]] if attention_mask is not None else None
+            attn_output = nn.functional.scaled_dot_product_attention(
+                query_states, k, v, attn_mask=attn_mask, scale=1.0 / math.sqrt(head_dim)
+            )
             attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
             attn_output = self.o_proj(attn_output)
             return attn_output, None, past_kv
@@ -1369,9 +1370,11 @@ class SlidingWindowLlamaAttention(LlamaAttention):
         # Attention over full cache (no causal mask needed for decode q_len=1)
         k = _llama_repeat_kv(kcache, num_kv_groups)
         v = _llama_repeat_kv(vcache, num_kv_groups)
-        attn_weights = torch.matmul(query_states, k.transpose(2, 3)) / math.sqrt(head_dim)
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, v)
+        # [vendor patch P16] 스테디스테이트 디코드(q_len=1, 링캐시 전체 참조·마스크 불필요)도
+        # SDPA로 — 토큰마다·레이어마다 도는 최핫패스라 디스패치 감소 이득이 가장 크다.
+        attn_output = nn.functional.scaled_dot_product_attention(
+            query_states, k, v, attn_mask=None, scale=1.0 / math.sqrt(head_dim)
+        )
         attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
         attn_output = self.o_proj(attn_output)
         return attn_output, None, past_kv
