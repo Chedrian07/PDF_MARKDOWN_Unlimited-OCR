@@ -96,15 +96,16 @@ _CJK_RE = re.compile(
     r"[ᄀ-ᇿ⺀-鿿ꥠ-꥿가-퟿豈-﫿＀-￯]"
 )
 
-# 면적 모델의 채움 상수. 글자 1개가 (fs*weight) 폭 × (fs*1.35 줄높이)를 차지한다고
-# 보고 박스 면적을 가중 글자수로 나눠 fs를 역산한다. 이 분모 상수는 줄간격(≈1.35)에
-# "채움 비효율"을 곱한 경험값이다 — 실제 텍스트는 OCR bbox를 꽉 채우지 않는다
-# (단어 간격·우측 래그·마지막 줄 여백·넉넉한 그라운딩 박스). 순수 줄간격 1.35만
-# 쓰면 교정 케이스가 ≈2.35cqw로 과대추정되어 목표 구간(1.05–1.7cqw)을 벗어난다.
-# 4.1로 두면 교정 케이스(A4 전폭 문단·ASCII 600자)가 구간 중앙 ≈1.35cqw에 떨어진다.
-# 서버는 일부러 작게(underfill) 추정한다: 클라이언트 fitter(layout-fit.js)는 축소만
-# 하고 확대는 하지 않으므로, 작게 잡아 두는 편이 오버플로우 클리핑을 막는 안전한 편향.
-_AREA_FILL = 4.1
+# 면적 모델의 채움 상수. 글자 1개가 대략 (fs·weight) 폭 × (fs·line-height) 높이를
+# 차지한다 → 글자당 면적 ≈ fs²·weight·line-height. 박스 면적을 가중 글자수로 나눠
+# fs를 역산하며, 이 분모 상수가 곧 "글자당 면적 / fs²"의 기하 항 line-height(≈1.2)다.
+# 진실 앵커(2504.19874v1.pdf 실측): 612×792pt 페이지·본문 10.9pt = 1.78cqw. 이를
+# 재현하는 케이스(bbox(60,100,940,280)·A4 비율·ASCII 1180자)에서 fs≈1.78cqw가
+# 나오도록 1.2로 맞췄다. (구 4.1은 "600자 수용" 잘못된 앵커에서 온 값 — 실제 그
+# 박스는 원본 타이포로 ~1180자를 담아 폰트를 55% 크기로 과소추정했다.)
+# 이 함수는 어디까지나 폴백이다: 원본 PDF 텍스트 레이어가 있으면 pdf_fonts가
+# block["fs"]에 실측값을 심고 렌더러가 그걸 우선한다.
+_AREA_FILL = 1.2
 
 
 def estimate_font_size_cqw(bbox, content: str, page_aspect: float) -> float | None:
@@ -178,10 +179,23 @@ def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -
             content = text_with_math_html(str(b.get("content") or ""))
             if btype == "table":
                 content = _restore_table_tags(content)
-            # 이미지 외 모든 블록: 면적 기반 폰트 크기(cqw)를 인라인. None이면 CSS 기본값.
+            # 폰트 크기(cqw): pdf_fonts가 심은 실측 block["fs"]를 우선([0.6,6.0] 클램프),
+            # 없으면 면적 휴리스틱으로 폴백. None이면 CSS 기본값 유지.
             # KaTeX도 이 font-size를 상속하므로 수식이 박스와 함께 스케일된다.
-            fs = estimate_font_size_cqw((x1, y1, x2, y2), content, page_aspect)
-            fs_css = f"font-size:{fs:.2f}cqw;line-height:1.32;" if fs is not None else ""
+            raw_fs = b.get("fs")
+            if isinstance(raw_fs, (int, float)):
+                fs = max(0.6, min(6.0, float(raw_fs)))
+            else:
+                fs = estimate_font_size_cqw((x1, y1, x2, y2), content, page_aspect)
+            if fs is not None:
+                # 논문 조판은 줄간격 ≈1.15–1.2 — 1.22로 좁힌다(잔여 오버플로우는
+                # 클라이언트 fitter가 축소로 흡수). 볼드 실측 블록은 굵게(제목 제외 —
+                # 제목은 이미 CSS로 굵다).
+                fs_css = f"font-size:{fs:.2f}cqw;line-height:1.22;"
+                if b.get("bold") and btype != "title":
+                    fs_css += "font-weight:600;"
+            else:
+                fs_css = ""
             blocks_html.append(
                 f'<div class="layout-block layout-{btype}" style="{style}{fs_css}" '
                 f'title="{btype}">{content}</div>'

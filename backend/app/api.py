@@ -210,6 +210,34 @@ def job_html(request: Request, job_id: str) -> HTMLResponse:
     return HTMLResponse(html, headers=headers)
 
 
+def _backfill_layout_fonts(job, pages: list) -> None:
+    """기존 잡 지연 백필: layout.json에 실측 폰트 크기(fs)가 빠진 비이미지 블록이
+    있고 source.pdf가 있으면, 텍스트 레이어에서 뽑아 in-place 주입 후 원자적 저장.
+    재변환 없이 이미 변환된 잡도 개선된다. enrichment 실패는 절대 500을 내지 않음."""
+    src = job.dir / "source.pdf"
+    if not src.exists():
+        return
+    needs = any(
+        isinstance(b, dict) and not b.get("image") and "fs" not in b
+        for pg in pages if isinstance(pg, dict)
+        for b in (pg.get("blocks") or ())
+    )
+    if not needs:
+        return
+    try:
+        from .pipeline.pdf_fonts import enrich_layout_fonts
+
+        if enrich_layout_fonts(src, pages):
+            import os
+
+            p = job.dir / "layout.json"
+            tmp = job.dir / ".layout.json.tmp"
+            tmp.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, p)
+    except Exception:
+        pass  # 백필 실패는 렌더를 막지 않는다 (폴백 휴리스틱으로 표시)
+
+
 def _load_layout_pages(job) -> list:
     p = job.dir / "layout.json"
     if not p.is_file():
@@ -217,11 +245,10 @@ def _load_layout_pages(job) -> list:
     try:
         pages = json.loads(p.read_text(encoding="utf-8"))
         assert isinstance(pages, list)
-        return pages
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(500, "레이아웃 데이터를 읽을 수 없습니다") from e
+    _backfill_layout_fonts(job, pages)
+    return pages
 
 
 @router.get("/jobs/{job_id}/layout.html")

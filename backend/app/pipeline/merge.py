@@ -143,6 +143,7 @@ class IncrementalMerger:
             raw_pages = json.loads(raw_path.read_text(encoding="utf-8"))["pages"]
         except Exception:
             return
+        new_pages: list[dict] = []
         for local, raw in enumerate(raw_pages[: chunk.num_pages]):
             g = chunk.start_page + (0 if chunk.single else local)
             blocks = parse_page_blocks(str(raw))
@@ -151,7 +152,17 @@ class IncrementalMerger:
                     # 벤더 크롭 순서 == boxes/이미지 저장 순서 → 글로벌 이미지명 매핑
                     b["image"] = _global_image_name(g, b.pop("crop_index"))
             w, h = self._page_size(g)
-            self.layout_pages.append({"page": g, "width": w, "height": h, "blocks": blocks})
+            page = {"page": g, "width": w, "height": h, "blocks": blocks}
+            new_pages.append(page)
+            self.layout_pages.append(page)
+        # 원본 PDF 텍스트 레이어의 실측 폰트 크기를 이번 청크 페이지들에 주입.
+        # (청크마다 pdf 재오픈 — ms 수준이라 무방. enrichment 실패는 잡을 깨지 않음.)
+        try:
+            from .pdf_fonts import enrich_layout_fonts
+
+            enrich_layout_fonts(self.job_dir / "source.pdf", new_pages)
+        except Exception:
+            pass
         if self.layout_pages:
             (self.job_dir / "layout.json").write_text(
                 json.dumps(self.layout_pages, ensure_ascii=False), encoding="utf-8"

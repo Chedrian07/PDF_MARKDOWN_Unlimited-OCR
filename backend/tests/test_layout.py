@@ -96,11 +96,12 @@ def test_layout_blocks_render_math_spans():
 
 # ── 면적 기반 폰트 크기 추정 (cqw) ─────────────────────────────────────
 def test_estimate_font_size_calibration():
-    # 교정: A4 전폭 문단(ASCII 600자, aspect 1.414)은 목표 1.05–1.7cqw
-    # (≈9–15px @ 860px 캔버스). _AREA_FILL=4.1이면 구간 중앙 ≈1.35cqw.
-    fs = estimate_font_size_cqw((60, 100, 940, 280), "x" * 600, 1.414)
+    # 진실 앵커(2504.19874v1.pdf 실측): 612×792pt 페이지 본문 10.9pt = 1.78cqw.
+    # 그 박스는 원본 타이포로 ~1180 ASCII자를 담는다 → 재현 케이스
+    # (bbox(60,100,940,280)·A4 비율·1180자)에서 fs가 1.6–2.0cqw여야 한다.
+    fs = estimate_font_size_cqw((60, 100, 940, 280), "x" * 1180, 1.414)
     assert fs is not None
-    assert 1.05 <= fs <= 1.7, fs
+    assert 1.6 <= fs <= 2.0, fs
 
 
 def test_estimate_cjk_smaller_than_ascii():
@@ -149,10 +150,33 @@ def test_render_layout_html_font_size_cqw_text_not_image():
     html = render_layout_html(pages, "/b")
     text_div = re.search(r'<div class="layout-block layout-text"[^>]*>', html).group(0)
     assert "font-size:" in text_div and "cqw" in text_div
-    assert "line-height:1.32" in text_div
+    assert "line-height:1.22" in text_div
     # 이미지 블록엔 폰트 크기 인라인이 없어야 함
     img_tag = re.search(r'<img class="layout-block layout-image"[^>]*>', html).group(0)
     assert "cqw" not in img_tag and "font-size:" not in img_tag
+
+
+def test_render_layout_html_fs_precedence():
+    # 실측 block["fs"]가 있으면 휴리스틱을 무시하고 그 값을 그대로 쓴다([0.6,6.0] 클램프).
+    pages = [{"page": 1, "width": 1000, "height": 1414, "blocks": [
+        {"type": "text", "bbox": [60, 100, 940, 280], "content": "본문 " * 40, "fs": 1.78},
+        {"type": "text", "bbox": [60, 300, 940, 480], "content": "굵게 " * 40, "fs": 2.5, "bold": True},
+        {"type": "title", "bbox": [60, 500, 940, 560], "content": "제목", "fs": 3.0, "bold": True},
+        {"type": "text", "bbox": [60, 600, 940, 700], "content": "과대", "fs": 99.0},
+        {"type": "text", "bbox": [60, 720, 940, 900], "content": "폴백 텍스트 예시 " * 30},  # fs 없음
+    ]}]
+    html = render_layout_html(pages, "/b")
+    divs = re.findall(r'<div class="layout-block layout-\w+"[^>]*style="([^"]*)"', html)
+    assert "font-size:1.78cqw;line-height:1.22;" in divs[0]
+    assert "font-weight:600;" not in divs[0]  # bold 아님
+    # 볼드 실측 블록: 굵게 (제목 아님)
+    assert "font-size:2.50cqw;line-height:1.22;" in divs[1] and "font-weight:600;" in divs[1]
+    # 제목은 실측 bold라도 font-weight 인라인 안 함 (CSS가 이미 굵게)
+    assert "font-size:3.00cqw;line-height:1.22;" in divs[2] and "font-weight:600;" not in divs[2]
+    # 클램프 상한 6.0
+    assert "font-size:6.00cqw;line-height:1.22;" in divs[3]
+    # fs 없는 블록은 휴리스틱 폴백 — cqw는 있되 1.78/2.50 등 실측값과 다름
+    assert "cqw" in divs[4] and "font-size:1.78cqw" not in divs[4]
 
 
 def test_layout_standalone_includes_fitter_after_typeset(tmp_path):
