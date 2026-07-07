@@ -322,6 +322,14 @@ const state = {
   previewLoaded: false,
   docLayoutLoaded: false,
   markdownLoaded: false,
+  // translation (완료된 잡 결과 화면 전용 — 잡 전환 시 초기화)
+  currentLang: 'orig',      // 'orig' | 'ko' — 현재 결과 뷰 언어
+  translateState: 'none',   // none|running|done|error|canceled
+  translateEs: null,        // 번역 진행 EventSource
+  translatePollTimer: 0,    // SSE 불가/실패 시 state 폴링 폴백
+  translateSseErrors: 0,
+  resultUrls: null,         // { markdown, archive, layoutHtml } — 언어별 다운로드 빌드용
+  currentBaseName: 'document',
   // timers
   jobsTimer: 0,
   healthTimer: 0,
@@ -380,6 +388,15 @@ const EL_IDS = {
   dlMd: 'dl-md',
   dlZip: 'dl-zip',
   dlLayout: 'dl-layout',
+  translateBtn: 'translate-btn',
+  translateProgress: 'translate-progress',
+  translateProgressLabel: 'translate-progress-label',
+  translateProgressTrack: 'translate-progress-track',
+  translateProgressFill: 'translate-progress-fill',
+  translateCancel: 'translate-cancel',
+  langToggle: 'lang-toggle',
+  langOrig: 'lang-orig',
+  langKo: 'lang-ko',
   previewBody: 'preview-body',
   doclayoutBody: 'doclayout-body',
   mdCode: 'md-code',
@@ -728,6 +745,7 @@ async function openJob(id) {
   state.previewLoaded = false;
   state.markdownLoaded = false;
   state.docLayoutLoaded = false;
+  state.currentLang = 'orig'; // 잡이 바뀌면 언어 선택 초기화
   resetLiveState();
   showJobView();
   renderJobList(); // refresh active highlight
@@ -1237,6 +1255,7 @@ function teardownConnections() {
   state.previewDirty = false;
   state.fallbackActive = false;
   state.sseErrorCount = 0;
+  teardownTranslate(); // 잡 전환·삭제·페이지 이탈 시 번역 구독도 함께 정리
 }
 
 function startStream(id) {
@@ -1357,10 +1376,15 @@ async function onJobDone(id, data) {
     el.errorSection.hidden = true;
     el.resultSection.hidden = false;
     el.liveDetails.open = false;
+    resetTranslateUI();
     const base = 'document';
-    setDownload(el.dlMd, data.markdown_url, `${base}.md`);
-    setDownload(el.dlZip, data.archive_url, `${base}.md.zip`);
-    setDownload(el.dlLayout, `/api/jobs/${state.currentJobId}/layout.html`, `${base}.layout.html`);
+    state.currentBaseName = base;
+    state.resultUrls = {
+      markdown: data.markdown_url,
+      archive: data.archive_url,
+      layoutHtml: `/api/jobs/${id}/layout.html`,
+    };
+    applyDownloadLangs();
     renderThumbGrid(el.layoutsGrid, [], '레이아웃 이미지를 불러오지 못했습니다.');
     renderThumbGrid(el.pagesGrid, [], '페이지 이미지를 불러오지 못했습니다.');
     state.previewLoaded = false;
@@ -1370,6 +1394,7 @@ async function onJobDone(id, data) {
     el.doclayoutBody.innerHTML = '';
     el.mdCode.textContent = '';
     activateTab('preview');
+    initTranslateForJob();
   }
   refreshJobs();
 }
@@ -1421,9 +1446,18 @@ function setDownload(anchor, url, downloadName) {
 function renderResult(job) {
   const r = job.result || {};
   const base = baseName(job.filename);
-  setDownload(el.dlMd, r.markdown_url, `${base}.md`);
-  setDownload(el.dlZip, r.archive_url, `${base}.md.zip`);
-  setDownload(el.dlLayout, `/api/jobs/${job.job_id}/layout.html`, `${base}.layout.html`);
+
+  // 결과를 새로 렌더할 때마다 번역 UI를 원문 상태로 리셋한다
+  // (이전 잡의 ko 선택/EventSource 구독 정리 + 언어 속성 제거).
+  resetTranslateUI();
+
+  state.currentBaseName = base;
+  state.resultUrls = {
+    markdown: r.markdown_url,
+    archive: r.archive_url,
+    layoutHtml: `/api/jobs/${job.job_id}/layout.html`,
+  };
+  applyDownloadLangs(); // currentLang='orig' → 원문 URL로 세팅
 
   renderThumbGrid(el.layoutsGrid, r.layouts, '레이아웃 이미지가 없습니다.');
   renderThumbGrid(el.pagesGrid, r.pages, '원본 페이지 이미지가 없습니다.');
@@ -1437,12 +1471,16 @@ function renderResult(job) {
   el.mdCode.textContent = '';
 
   activateTab('preview');
+
+  // 번역 컨트롤은 완료(done) 잡에만 붙인다 (취소본은 renderPartialResult가 숨김 유지).
+  if (job.status === 'done') initTranslateForJob();
 }
 
 // Canceled job: no result object, but partial markdown endpoints still work.
 function renderPartialResult(job) {
   const id = job.job_id;
   const base = baseName(job.filename);
+  resetTranslateUI(); // 취소본은 번역 대상이 아니다 (컨트롤 숨김)
   setDownload(el.dlMd, `/api/jobs/${id}/markdown`, `${base}.partial.md`);
   setDownload(el.dlZip, null); // archive returns 409 for unfinished jobs
   setDownload(el.dlLayout, `/api/jobs/${id}/layout.html`, `${base}.layout.html`); // 부분 레이아웃도 유효
@@ -1475,6 +1513,298 @@ function renderThumbGrid(grid, arr, emptyMsg) {
   });
 }
 
+/* ============================ Translation (한국어 번역) ============================
+ * 완료된 잡 결과 화면 전용. 상태 머신:
+ *   none/error/canceled → [한국어 번역] 버튼 (error/canceled는 재시도 의미)
+ *   running             → 진행바 + 취소(✕), EventSource 재접속
+ *   done                → [원문 | 한국어] 세그먼트 토글
+ * 라이브 변환 뷰(result-section이 hidden)에는 렌더되지 않는다 — done일 때만 init.
+ * ================================================================================ */
+
+// URL 언어 파라미터 빌더 (순수 — 테스트 대상). ko가 아니면 원본 URL 그대로.
+export function withLangUrl(url, lang) {
+  if (lang !== 'ko' || !url) return url;
+  return url + (url.indexOf('?') === -1 ? '?' : '&') + 'lang=ko';
+}
+
+// translate/state·POST 응답의 status → 노출할 UI (순수 — 테스트 대상).
+export function translateUiStateFor(status) {
+  if (status === 'running') return 'progress';
+  if (status === 'done') return 'toggle';
+  return 'button'; // none | error | canceled | 미지의 값 → 버튼(재시도)
+}
+
+function teardownTranslate() {
+  if (state.translateEs) { try { state.translateEs.close(); } catch (_) { /* ignore */ } state.translateEs = null; }
+  if (state.translatePollTimer) { clearInterval(state.translatePollTimer); state.translatePollTimer = 0; }
+  state.translateSseErrors = 0;
+}
+
+// 번역 UI를 원문 기준으로 완전 초기화 (구독 정리 + 세 컨트롤 숨김 + 언어 속성 제거).
+function resetTranslateUI() {
+  teardownTranslate();
+  state.currentLang = 'orig';
+  state.translateState = 'none';
+  el.translateBtn.hidden = true;
+  el.translateProgress.hidden = true;
+  el.langToggle.hidden = true;
+  setLangSegActive('orig');
+  setResultLangAttr();
+}
+
+/* ── 컨트롤 3종 교체 노출 ─────────────────────────────────────────────── */
+function showTranslateButton() {
+  el.translateBtn.hidden = false;
+  el.translateProgress.hidden = true;
+  el.langToggle.hidden = true;
+  el.translateBtn.disabled = false;
+}
+function showTranslateProgress(current, total) {
+  el.translateBtn.hidden = true;
+  el.translateProgress.hidden = false;
+  el.langToggle.hidden = true;
+  el.translateCancel.disabled = false;
+  updateTranslateProgress(current, total);
+}
+function showLangToggle() {
+  el.translateBtn.hidden = true;
+  el.translateProgress.hidden = true;
+  el.langToggle.hidden = false;
+}
+
+function updateTranslateProgress(current, total) {
+  const cur = Number(current) || 0;
+  const tot = Number(total) || 0;
+  el.translateProgressLabel.textContent = tot > 0 ? `번역 중 ${cur}/${tot}` : '번역 중…';
+  const determinate = tot > 0;
+  el.translateProgressTrack.classList.toggle('indeterminate', !determinate);
+  el.translateProgressFill.style.width = determinate
+    ? `${Math.min(100, Math.max(0, (cur / tot) * 100))}%`
+    : '';
+}
+
+function setLangSegActive(lang) {
+  const ko = lang === 'ko';
+  el.langOrig.classList.toggle('active', !ko);
+  el.langKo.classList.toggle('active', ko);
+  el.langOrig.setAttribute('aria-pressed', ko ? 'false' : 'true');
+  el.langKo.setAttribute('aria-pressed', ko ? 'true' : 'false');
+}
+
+// 문서/레이아웃 뷰 컨테이너의 lang="ko" 속성 토글 (CJK 조판 CSS 적용용).
+function setResultLangAttr() {
+  const ko = state.currentLang === 'ko';
+  for (const node of [el.previewBody, el.doclayoutBody]) {
+    if (!node) continue;
+    if (ko) node.setAttribute('lang', 'ko');
+    else node.removeAttribute('lang');
+  }
+}
+
+// 현재 언어에 맞춰 다운로드 링크(markdown·layout.html)를 다시 세팅. 아카이브는
+// ko 파일이 자동 포함되므로 원본 URL 그대로 둔다.
+function applyDownloadLangs() {
+  const u = state.resultUrls || {};
+  const base = state.currentBaseName || 'document';
+  const suffix = state.currentLang === 'ko' ? '.ko' : '';
+  setDownload(el.dlMd, u.markdown ? withLangUrl(u.markdown, state.currentLang) : null, `${base}${suffix}.md`);
+  setDownload(el.dlZip, u.archive || null, `${base}.md.zip`);
+  setDownload(el.dlLayout, u.layoutHtml ? withLangUrl(u.layoutHtml, state.currentLang) : null, `${base}${suffix}.layout.html`);
+}
+
+// 결과 뷰 진입 시 번역 상태를 조회해 알맞은 컨트롤을 노출한다 (done 잡에서만 호출).
+async function initTranslateForJob() {
+  const id = state.currentJobId;
+  if (!id) return;
+  let st = null;
+  try {
+    st = await apiGet(`/api/jobs/${id}/translate/state?lang=ko`);
+  } catch (_) { /* state 엔드포인트 불가 → 버튼 노출로 폴백 */ }
+  if (state.currentJobId !== id) return;
+  const status = (st && st.status) || 'none';
+  state.translateState = status;
+  const ui = translateUiStateFor(status);
+  if (ui === 'progress') {
+    showTranslateProgress(st && st.current, st && st.total);
+    connectTranslateEvents(id); // 진행 중이던 번역에 재접속
+  } else if (ui === 'toggle') {
+    showLangToggle(); // 이미 번역 완료 → 토글만 노출(원문 기본, 사용자가 선택)
+  } else {
+    showTranslateButton();
+  }
+}
+
+// [한국어 번역] 클릭 → 번역 시작.
+async function startTranslate() {
+  const id = state.currentJobId;
+  if (!id) return;
+  el.translateBtn.disabled = true;
+  let res = null;
+  let data = null;
+  try {
+    res = await fetch(`/api/jobs/${id}/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ lang: 'ko', force: false }),
+    });
+    const text = await res.text().catch(() => '');
+    data = text ? safeParse(text) : null;
+  } catch (_) {
+    if (state.currentJobId !== id) return;
+    el.translateBtn.disabled = false;
+    showToast('번역 요청 중 네트워크 오류가 발생했습니다.', 'error');
+    return;
+  }
+  if (state.currentJobId !== id) return;
+
+  if (!res.ok) {
+    el.translateBtn.disabled = false;
+    const detail = (data && typeof data.detail === 'string') ? data.detail : null;
+    if (res.status === 503) showToast(detail || '번역 프로바이더가 설정되지 않았습니다.', 'error');
+    else if (res.status === 409) showToast(detail || '아직 완료되지 않은 작업은 번역할 수 없습니다.', 'warn');
+    else if (res.status === 400) showToast(detail || '지원하지 않는 번역 언어입니다.', 'error');
+    else showToast(detail || `번역 요청에 실패했습니다. (${res.status})`, 'error');
+    return;
+  }
+
+  // 202/200 — 이미 번역돼 있으면(done) 바로 토글, 아니면 진행 UI + 구독.
+  state.translateState = 'running';
+  if (data && data.status === 'done') { onTranslateDone(id); return; }
+  showTranslateProgress(0, 0);
+  connectTranslateEvents(id);
+}
+
+function connectTranslateEvents(id) {
+  teardownTranslate(); // 중복 구독 방지
+  if (typeof EventSource === 'undefined') { startTranslatePolling(id); return; }
+  let es;
+  try {
+    es = new EventSource(`/api/jobs/${id}/translate/events?lang=ko`);
+  } catch (_) { startTranslatePolling(id); return; }
+  state.translateEs = es;
+
+  es.addEventListener('progress', (e) => {
+    if (state.currentJobId !== id) return;
+    state.translateSseErrors = 0;
+    const d = parseEventData(e);
+    if (d) { state.translateState = 'running'; showTranslateProgress(d.current, d.total); }
+  });
+  es.addEventListener('done', (e) => {
+    if (state.currentJobId !== id) return;
+    onTranslateDone(id);
+  });
+  es.addEventListener('error', (e) => {
+    if (state.currentJobId !== id) return;
+    const d = parseEventData(e);
+    if (d) onTranslateError(id, d);        // 서버가 보낸 번역 오류(JSON)
+    else handleTranslateConnError(id);     // 전송 계층 오류(데이터 없음)
+  });
+}
+
+function handleTranslateConnError(id) {
+  if (state.currentJobId !== id || !state.translateEs) return;
+  state.translateSseErrors += 1;
+  if (state.translateSseErrors >= 2) { teardownTranslate(); startTranslatePolling(id); }
+}
+
+// SSE 불가/불안정 시 state를 폴링해 진행/완료/오류를 반영하는 폴백.
+function startTranslatePolling(id) {
+  teardownTranslate();
+  state.translatePollTimer = setInterval(async () => {
+    if (state.currentJobId !== id) { clearInterval(state.translatePollTimer); state.translatePollTimer = 0; return; }
+    let st;
+    try { st = await apiGet(`/api/jobs/${id}/translate/state?lang=ko`); }
+    catch (_) { return; }
+    if (state.currentJobId !== id) return;
+    const status = st && st.status;
+    if (status === 'running') { showTranslateProgress(st.current, st.total); return; }
+    clearInterval(state.translatePollTimer); state.translatePollTimer = 0;
+    if (status === 'done') onTranslateDone(id);
+    else if (status === 'error') onTranslateError(id, { message: st.error });
+    else if (status === 'canceled') onTranslateError(id, { canceled: true });
+    else showTranslateButton();
+  }, 1500);
+}
+
+function onTranslateDone(id) {
+  if (state.currentJobId !== id) return;
+  teardownTranslate();
+  state.translateState = 'done';
+  showLangToggle();
+  setLang('ko'); // 완료 직후 자동으로 한국어 뷰로 전환
+}
+
+function onTranslateError(id, d) {
+  if (state.currentJobId !== id) return;
+  teardownTranslate();
+  const canceled = !!(d && d.canceled);
+  state.translateState = canceled ? 'canceled' : 'error';
+  showTranslateButton(); // 버튼 복원(재시도 가능)
+  if (canceled) showToast('번역이 취소되었습니다.', 'warn');
+  else showToast((d && d.message) || '번역 중 오류가 발생했습니다.', 'error');
+}
+
+// 취소(✕) — 요청만 보내고, UI 확정은 error(canceled) 이벤트/폴링에 맡긴다.
+async function cancelTranslate() {
+  const id = state.currentJobId;
+  if (!id) return;
+  el.translateCancel.disabled = true;
+  let ok = false;
+  try {
+    const res = await fetch(`/api/jobs/${id}/translate/cancel?lang=ko`, { method: 'POST' });
+    ok = res.ok || res.status === 404;
+  } catch (_) { /* 네트워크 오류 */ }
+  if (state.currentJobId !== id) return;
+  if (!ok) {
+    el.translateCancel.disabled = false;
+    showToast('번역 취소 요청에 실패했습니다.', 'error');
+  }
+  // 성공: error(canceled) 이벤트 또는 state 폴링이 버튼을 복원한다.
+}
+
+// 언어 토글. 캐시를 무효화하고 현재 탭을 새 언어로 다시 로드한다.
+function setLang(lang) {
+  const next = lang === 'ko' ? 'ko' : 'orig';
+  setLangSegActive(next);
+  if (state.currentLang === next) return;
+  state.currentLang = next;
+  setResultLangAttr();
+  state.previewLoaded = false;
+  state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
+  el.previewBody.innerHTML = '';
+  el.doclayoutBody.innerHTML = '';
+  el.mdCode.textContent = '';
+  applyDownloadLangs();
+  reloadActiveResultTab();
+}
+
+// 번역본 fetch가 404/실패일 때 조용히 원문으로 되돌린다 (호출부가 재로드).
+function revertToOriginal(reason) {
+  if (state.currentLang !== 'ko') return false;
+  state.currentLang = 'orig';
+  setLangSegActive('orig');
+  setResultLangAttr();
+  applyDownloadLangs();
+  state.previewLoaded = false;
+  state.markdownLoaded = false;
+  state.docLayoutLoaded = false;
+  el.previewBody.innerHTML = '';
+  el.doclayoutBody.innerHTML = '';
+  el.mdCode.textContent = '';
+  showToast(reason || '번역본을 불러오지 못해 원문을 표시합니다.', 'warn');
+  return true;
+}
+
+// 현재 활성 결과 탭만 다시 로드 (썸네일 탭은 언어 무관 → 스킵).
+function reloadActiveResultTab() {
+  const active = el.tabs.find((t) => t.classList.contains('active'));
+  const name = active ? active.dataset.tab : 'preview';
+  if (name === 'preview') loadPreview();
+  else if (name === 'markdown') loadMarkdown();
+  else if (name === 'doclayout') loadDocLayout();
+}
+
 /* ============================ Tabs ============================ */
 
 function activateTab(name) {
@@ -1494,16 +1824,23 @@ async function loadDocLayout() {
   if (state.docLayoutLoaded) return;
   const id = state.currentJobId;
   if (!id) return;
+  const lang = state.currentLang; // 응답 도착 시점에 언어가 바뀌었는지 판별용
   el.doclayoutBody.textContent = '';
   el.doclayoutBody.appendChild(h('p', { class: 'muted', text: '레이아웃을 불러오는 중…' }));
   let html = null;
   let missing = false;
   try {
-    const res = await fetch(`/api/jobs/${id}/layout`, { headers: { Accept: 'text/html' } });
+    const res = await fetch(withLangUrl(`/api/jobs/${id}/layout`, lang), { headers: { Accept: 'text/html' } });
     if (res.status === 404) missing = true;
     else if (res.ok) html = await res.text();
   } catch (_) { /* 아래 공통 실패 처리 */ }
-  if (state.currentJobId !== id) return;
+  if (state.currentJobId !== id || state.currentLang !== lang) return; // 잡/언어 전환 → 최신 로더에 위임
+  // 한국어 뷰에서 번역본을 못 받으면(404·실패) 조용히 원문으로 폴백 + 토스트.
+  if ((missing || html == null) && lang === 'ko' &&
+      revertToOriginal('한국어 레이아웃을 불러오지 못해 원문을 표시합니다.')) {
+    loadDocLayout();
+    return;
+  }
   el.doclayoutBody.textContent = '';
   if (missing) {
     state.docLayoutLoaded = true; // 404는 재시도해도 같음
@@ -1519,6 +1856,7 @@ async function loadDocLayout() {
   }
   state.docLayoutLoaded = true;
   // Trusted server-rendered fragment (pipeline/layout.py — 텍스트 전부 이스케이프됨).
+  // 번역본은 루트에 lang="ko"가 붙어 오지만, 컨테이너에도 setResultLangAttr로 반영해 둔다.
   el.doclayoutBody.innerHTML = html;
   typesetMath(el.doclayoutBody);
   if (window.uocrFitLayout) window.uocrFitLayout(el.doclayoutBody);
@@ -1528,21 +1866,22 @@ async function loadPreview() {
   if (state.previewLoaded) return;
   const id = state.currentJobId;
   if (!id) return;
+  const lang = state.currentLang;
   el.previewBody.textContent = '';
   el.previewBody.appendChild(h('p', { class: 'muted', text: '미리보기를 불러오는 중…' }));
-  let html;
+  let html = null;
   try {
-    const res = await fetch(`/api/jobs/${id}/html`, { headers: { Accept: 'text/html' } });
-    if (!res.ok) throw new Error(String(res.status));
-    html = await res.text();
-  } catch (_) {
-    if (state.currentJobId === id) {
-      el.previewBody.textContent = '';
-      el.previewBody.appendChild(h('p', { class: 'muted', text: '미리보기를 불러오지 못했습니다.' }));
-    }
+    const res = await fetch(withLangUrl(`/api/jobs/${id}/html`, lang), { headers: { Accept: 'text/html' } });
+    if (res.ok) html = await res.text();
+  } catch (_) { /* 아래 공통 실패 처리 */ }
+  if (state.currentJobId !== id || state.currentLang !== lang) return;
+  if (html == null) {
+    // 한국어 뷰에서 번역본을 못 받으면 조용히 원문으로 폴백.
+    if (lang === 'ko' && revertToOriginal('한국어 미리보기를 불러오지 못해 원문을 표시합니다.')) { loadPreview(); return; }
+    el.previewBody.textContent = '';
+    el.previewBody.appendChild(h('p', { class: 'muted', text: '미리보기를 불러오지 못했습니다.' }));
     return;
   }
-  if (state.currentJobId !== id) return;
   state.previewLoaded = true;
   // Trusted server-rendered fragment (/html, same renderer as /render-preview).
   el.previewBody.innerHTML = html;
@@ -1553,17 +1892,19 @@ async function loadMarkdown() {
   if (state.markdownLoaded) return;
   const id = state.currentJobId;
   if (!id) return;
+  const lang = state.currentLang;
   el.mdCode.textContent = '불러오는 중…';
-  let text;
+  let text = null;
   try {
-    const res = await fetch(`/api/jobs/${id}/markdown`, { headers: { Accept: 'text/markdown' } });
-    if (!res.ok) throw new Error(String(res.status));
-    text = await res.text();
-  } catch (_) {
-    if (state.currentJobId === id) el.mdCode.textContent = 'Markdown을 불러오지 못했습니다.';
+    const res = await fetch(withLangUrl(`/api/jobs/${id}/markdown`, lang), { headers: { Accept: 'text/markdown' } });
+    if (res.ok) text = await res.text();
+  } catch (_) { /* 아래 공통 실패 처리 */ }
+  if (state.currentJobId !== id || state.currentLang !== lang) return;
+  if (text == null) {
+    if (lang === 'ko' && revertToOriginal('한국어 Markdown을 불러오지 못해 원문을 표시합니다.')) { loadMarkdown(); return; }
+    el.mdCode.textContent = 'Markdown을 불러오지 못했습니다.';
     return;
   }
-  if (state.currentJobId !== id) return;
   state.markdownLoaded = true;
   el.mdCode.textContent = text;
 }
@@ -1784,6 +2125,13 @@ function init() {
     if (!state.currentJobId) return;
     armDelete(el.jobDelete, () => deleteJob(state.currentJobId));
   });
+
+  // 번역 컨트롤
+  el.translateCancel.innerHTML = ICON.x;
+  el.translateBtn.addEventListener('click', startTranslate);
+  el.translateCancel.addEventListener('click', cancelTranslate);
+  el.langOrig.addEventListener('click', () => setLang('orig'));
+  el.langKo.addEventListener('click', () => setLang('ko'));
   el.pagerPrev.addEventListener('click', () => pageNav(-1));
   el.pagerNext.addEventListener('click', () => pageNav(1));
   el.followChip.addEventListener('click', () => {

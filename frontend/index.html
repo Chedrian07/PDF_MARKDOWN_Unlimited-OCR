@@ -231,6 +231,27 @@
             <a id="dl-md" class="btn btn-primary" download>Markdown 다운로드</a>
             <a id="dl-zip" class="btn btn-secondary" download>ZIP 다운로드 (이미지 포함)</a>
             <a id="dl-layout" class="btn btn-secondary" download>레이아웃 HTML</a>
+
+            <!-- 한국어 번역 컨트롤 (완료된 잡에만 노출; JS가 버튼/진행/토글을 교체) -->
+            <div id="translate-controls" class="translate-controls">
+              <button id="translate-btn" class="btn btn-secondary btn-translate" type="button" hidden>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M4 5h7M9 3v2c0 4-2 7-5 8"/>
+                  <path d="M5 9c0 2.5 2.5 4.5 6 5"/>
+                  <path d="M13 21l4-9 4 9M14.5 17h5"/>
+                </svg>
+                <span>한국어 번역</span>
+              </button>
+              <div id="translate-progress" class="translate-progress" role="status" aria-live="polite" hidden>
+                <span id="translate-progress-label" class="tp-label">번역 중…</span>
+                <div id="translate-progress-track" class="tp-track"><div id="translate-progress-fill" class="tp-fill"></div></div>
+                <button id="translate-cancel" class="icon-btn-sm tp-cancel" type="button" aria-label="번역 취소" title="번역 취소"></button>
+              </div>
+              <div id="lang-toggle" class="lang-toggle" role="group" aria-label="문서 언어 선택" hidden>
+                <button id="lang-orig" class="lang-seg active" type="button" data-lang="orig" aria-pressed="true">원문</button>
+                <button id="lang-ko" class="lang-seg" type="button" data-lang="ko" aria-pressed="false">한국어</button>
+              </div>
+            </div>
           </div>
 
           <div class="tabs" role="tablist" aria-label="결과 보기">

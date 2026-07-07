@@ -779,6 +779,57 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 }
 .grid-empty { padding: 20px 4px; font-size: 13px; text-align: center; }
 
+/* ---- 번역 컨트롤 (다운로드 툴바 우측) ----------------------------------- */
+/* 버튼 → 진행 → 언어 토글 순으로 JS가 교체 노출. 기존 버튼/진행바 토큰 재사용. */
+.translate-controls { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+
+.btn-translate .svg, .btn-translate svg { flex: 0 0 auto; }
+
+.translate-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 6px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+.tp-label { font-size: 12.5px; font-weight: 550; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tp-track { position: relative; width: 92px; height: 6px; border-radius: 999px; background: var(--bg-sunken); overflow: hidden; }
+.tp-fill { height: 100%; width: 0; border-radius: 999px; background: var(--accent); transition: width 0.3s ease; }
+.tp-track.indeterminate .tp-fill { width: 40%; animation: indet 1.3s ease-in-out infinite; }
+.tp-cancel { color: var(--text-subtle); }
+.tp-cancel:hover { color: var(--danger); background: var(--danger-weak); }
+.tp-cancel:disabled { opacity: 0.5; cursor: default; }
+
+/* 언어 세그먼트 컨트롤 [원문 | 한국어] */
+.lang-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 36px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+}
+.lang-seg {
+  appearance: none;
+  border: none;
+  background: transparent;
+  height: 30px;
+  padding: 0 13px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text-muted);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.lang-seg:hover { color: var(--text); }
+.lang-seg.active { background: var(--bg-elev); color: var(--accent); box-shadow: var(--shadow-sm); }
+
 /* ---- Markdown preview --------------------------------------------------- */
 .markdown-body { font-size: 14px; line-height: 1.7; color: var(--text); word-wrap: break-word; }
 .markdown-body > *:first-child { margin-top: 0; }
@@ -971,3 +1022,15 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 /* 세로쓰기 블록 (arXiv 여백 스탬프 등 — pdf_fonts의 줄 방향 감지) */
 .layout-vertical-up { writing-mode: sideways-lr; white-space: nowrap; text-align: center; }
 .layout-vertical-down { writing-mode: vertical-rl; white-space: nowrap; text-align: center; }
+
+/* ── 한국어 번역 뷰 CJK 조판 ─────────────────────────────────────────────
+   레이아웃 뷰: 백엔드 standalone CSS(_STANDALONE_CSS)와 동일 규칙로 합의.
+   문서 뷰(markdown-body): 기존 폰트 스택(--font)에 한국어 폴백이 이미 있어
+   폰트는 유지하고 어절 단위 줄바꿈(keep-all)만 적용 — 과하게 바꾸지 않는다. */
+/* 주의: 앱 문서 자체가 <html lang="ko">라 조상 선택자([lang] 후손)로 쓰면
+   원문 레이아웃 뷰까지 걸린다 — lang이 붙는 래퍼 요소 자체에 스코프할 것. */
+.doclayout-body[lang="ko"] .layout-block {
+  font-family: "Noto Serif KR", "Source Han Serif K", "Apple SD Gothic Neo", "Malgun Gothic", serif;
+  word-break: keep-all;
+}
+.markdown-body[lang="ko"] { word-break: keep-all; }

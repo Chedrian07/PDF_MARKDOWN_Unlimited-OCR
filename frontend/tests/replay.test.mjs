@@ -24,6 +24,8 @@ import {
   structurePreview,
   incompleteTailIndex,
   scanQuads,
+  withLangUrl,
+  translateUiStateFor,
 } from '../app.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -388,4 +390,30 @@ test('structurer: fake-engine plain markdown passes through with page separators
   assert.ok(md.includes('| 항목 | 값 |'), 'markdown table preserved');
   assert.equal(md.split('\n\n').filter((p) => p === '---').length, 2, '2 separators for 3 pages');
   assert.ok(!md.includes(PAGE_MARKER));
+});
+
+/* ================= translation pure core ================= */
+
+test('withLangUrl: appends ?lang=ko only for ko, preserving existing query', () => {
+  // 원문(orig)은 URL을 건드리지 않는다
+  assert.equal(withLangUrl('/api/jobs/x/markdown', 'orig'), '/api/jobs/x/markdown');
+  assert.equal(withLangUrl('/api/jobs/x/markdown', undefined), '/api/jobs/x/markdown');
+  // ko는 쿼리 파라미터 추가
+  assert.equal(withLangUrl('/api/jobs/x/markdown', 'ko'), '/api/jobs/x/markdown?lang=ko');
+  assert.equal(withLangUrl('/api/jobs/x/layout', 'ko'), '/api/jobs/x/layout?lang=ko');
+  // 기존 쿼리가 있으면 &로 이어붙인다
+  assert.equal(withLangUrl('/api/jobs/x/files?r=1', 'ko'), '/api/jobs/x/files?r=1&lang=ko');
+  // falsy URL은 그대로 반환
+  assert.equal(withLangUrl(null, 'ko'), null);
+  assert.equal(withLangUrl('', 'ko'), '');
+});
+
+test('translateUiStateFor: state → control mapping', () => {
+  assert.equal(translateUiStateFor('running'), 'progress');
+  assert.equal(translateUiStateFor('done'), 'toggle');
+  // none/error/canceled/미지 값은 모두 버튼(재시도)
+  assert.equal(translateUiStateFor('none'), 'button');
+  assert.equal(translateUiStateFor('error'), 'button');
+  assert.equal(translateUiStateFor('canceled'), 'button');
+  assert.equal(translateUiStateFor(undefined), 'button');
 });
