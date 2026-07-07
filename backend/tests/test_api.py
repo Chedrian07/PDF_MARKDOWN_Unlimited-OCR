@@ -69,6 +69,8 @@ def test_full_flow_multi(client, sample_pdf):
     assert f'src="/api/jobs/{jid}/files/images/p0001_0.jpg"' in layout.text
     assert "layout-title" in layout.text
     assert '<span class="math-inline">E = mc^2</span>' in layout.text
+    # 면적 기반 폰트 크기(cqw)가 텍스트 블록에 인라인됨
+    assert "font-size:" in layout.text and "cqw" in layout.text
 
     # standalone HTML 다운로드: 자립형(이미지 base64), attachment 헤더
     dl = client.get(f"/api/jobs/{jid}/layout.html")
@@ -76,6 +78,8 @@ def test_full_flow_multi(client, sample_pdf):
     assert "attachment" in dl.headers["content-disposition"]
     assert dl.text.startswith("<!doctype html>")
     assert "data:image/jpeg;base64," in dl.text
+    # (uocrFitLayout/KaTeX 인라인은 frontend_dir 자산 필요 — client 픽스처는
+    #  no-frontend로 비활성화하므로 여기서 단언 안 함. E2E/test_layout에서 검증.)
     assert f"/api/jobs/{jid}" not in dl.text  # 서버 참조 없는 완전 자립 파일
 
     img = client.get(res["images"][0])

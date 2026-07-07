@@ -88,6 +88,62 @@ def _pct(v: int) -> str:
     return f"{v / 999 * 100:.2f}"
 
 
+# ── 면적 기반 폰트 크기 추정 (cqw 단위, 해상도 독립) ──────────────────────
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+# CJK/전각: 한글 자모·음절, 한자(라디컬 포함), 가나, 전각 폼 — 폭 1.0em 취급
+_CJK_RE = re.compile(
+    r"[ᄀ-ᇿ⺀-鿿ꥠ-꥿가-퟿豈-﫿＀-￯]"
+)
+
+# 면적 모델의 채움 상수. 글자 1개가 (fs*weight) 폭 × (fs*1.35 줄높이)를 차지한다고
+# 보고 박스 면적을 가중 글자수로 나눠 fs를 역산한다. 이 분모 상수는 줄간격(≈1.35)에
+# "채움 비효율"을 곱한 경험값이다 — 실제 텍스트는 OCR bbox를 꽉 채우지 않는다
+# (단어 간격·우측 래그·마지막 줄 여백·넉넉한 그라운딩 박스). 순수 줄간격 1.35만
+# 쓰면 교정 케이스가 ≈2.35cqw로 과대추정되어 목표 구간(1.05–1.7cqw)을 벗어난다.
+# 4.1로 두면 교정 케이스(A4 전폭 문단·ASCII 600자)가 구간 중앙 ≈1.35cqw에 떨어진다.
+# 서버는 일부러 작게(underfill) 추정한다: 클라이언트 fitter(layout-fit.js)는 축소만
+# 하고 확대는 하지 않으므로, 작게 잡아 두는 편이 오버플로우 클리핑을 막는 안전한 편향.
+_AREA_FILL = 4.1
+
+
+def estimate_font_size_cqw(bbox, content: str, page_aspect: float) -> float | None:
+    """블록 면적·가중 글자수로 폰트 크기(cqw)를 추정. 불가하면 None(CSS 기본값 유지).
+
+    - bbox = (x1,y1,x2,y2) 0–999 정규화, page_aspect = 페이지높이px / 페이지폭px.
+    - cqw = 캔버스 폭의 1% (container-type: inline-size). 창 크기가 바뀌어도
+      비율이 유지되는 해상도 독립 단위.
+    - 태그 제거(표 블록은 <table> 마크업 포함) → 공백 런 축약 → 가중 글자수:
+      ASCII 0.5, CJK/전각 1.0, 그 외 0.65. 가중합<1 또는 빈 텍스트면 None.
+    """
+    if not content:
+        return None
+    if not bbox or len(bbox) != 4:
+        return None
+    x1, y1, x2, y2 = bbox
+    text = _WS_RE.sub(" ", _TAG_RE.sub(" ", content)).strip()
+    if not text:
+        return None
+    weighted = 0.0
+    for ch in text:
+        if ord(ch) < 128:
+            weighted += 0.5
+        elif _CJK_RE.match(ch):
+            weighted += 1.0
+        else:
+            weighted += 0.65
+    if weighted < 1:
+        return None
+    w = (x2 - x1) / 999 * 100
+    h = (y2 - y1) / 999 * 100 * page_aspect
+    if w <= 0 or h <= 0:
+        return None
+    # 면적 모델: fs² · _AREA_FILL · weighted = w·h  →  fs = sqrt(w·h / (_AREA_FILL·weighted))
+    fs = ((w * h) / (_AREA_FILL * weighted)) ** 0.5
+    fs = min(fs, h / 1.25)          # 단일 줄 상한 — 얕은 박스에서 과대추정 방지
+    return max(0.8, min(3.6, fs))   # cqw 클램프 [0.8, 3.6]
+
+
 def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -> str:
     """layout.json(merge가 통합한 페이지 블록들) → 절대 배치 HTML 프래그먼트.
     image_src(name)->str 을 주면 이미지 src를 그 값으로 (standalone의 data URI용)."""
@@ -96,6 +152,7 @@ def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -
         width = p.get("width") or 1000
         height = p.get("height") or 1414
         aspect_pct = height / width * 100 if width else 141.4
+        page_aspect = height / width if width else 1.414
         blocks_html: list[str] = []
         for b in p.get("blocks", ()):
             bbox = b.get("bbox") or []
@@ -121,8 +178,12 @@ def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -
             content = text_with_math_html(str(b.get("content") or ""))
             if btype == "table":
                 content = _restore_table_tags(content)
+            # 이미지 외 모든 블록: 면적 기반 폰트 크기(cqw)를 인라인. None이면 CSS 기본값.
+            # KaTeX도 이 font-size를 상속하므로 수식이 박스와 함께 스케일된다.
+            fs = estimate_font_size_cqw((x1, y1, x2, y2), content, page_aspect)
+            fs_css = f"font-size:{fs:.2f}cqw;line-height:1.32;" if fs is not None else ""
             blocks_html.append(
-                f'<div class="layout-block layout-{btype}" style="{style}" '
+                f'<div class="layout-block layout-{btype}" style="{style}{fs_css}" '
                 f'title="{btype}">{content}</div>'
             )
         sections.append(
@@ -135,15 +196,16 @@ def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -
 
 
 # ── standalone HTML (다운로드용 단일 파일 — PDF 대응 뷰) ─────────────────
-# frontend/styles.css의 .layout-* 규칙과 시각적으로 동기 유지할 것.
+# ⚠ SYNC: frontend/styles.css의 .layout-* 규칙과 시각적으로 동기 유지할 것
+# (.layout-block의 pre-wrap/justify/serif, .layout-canvas의 container-type 포함).
 _STANDALONE_CSS = """
 :root { color-scheme: light; }
 * { box-sizing: border-box; margin: 0; }
 body { background: #eceef2; font-family: system-ui, -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; padding: 24px 12px; }
 .doclayout-body { display: grid; gap: 26px; max-width: 900px; margin-inline: auto; }
 .layout-page::before { content: "페이지 " attr(data-page); display: block; font-size: 11px; color: #666; margin-bottom: 4px; }
-.layout-canvas { position: relative; width: 100%; height: 0; background: #fff; border: 1px solid #d5d7dd; border-radius: 6px; box-shadow: 0 1px 5px rgba(0,0,0,.1); overflow: hidden; }
-.layout-block { position: absolute; overflow: hidden; font-size: 11px; line-height: 1.35; color: #1a1c22; padding: 1px 3px; }
+.layout-canvas { position: relative; width: 100%; height: 0; background: #fff; border: 1px solid #d5d7dd; border-radius: 6px; box-shadow: 0 1px 5px rgba(0,0,0,.1); overflow: hidden; container-type: inline-size; }
+.layout-block { position: absolute; overflow: hidden; font-size: 11px; line-height: 1.35; color: #1a1c22; padding: 1px 3px; white-space: pre-wrap; text-align: justify; hyphens: auto; font-family: Georgia, 'Times New Roman', 'Noto Serif KR', serif; }
 .layout-title { font-weight: 700; font-size: 14px; color: #b0262c; }
 .layout-image { object-fit: contain; padding: 0; }
 .layout-table { font-size: 9px; }
@@ -186,6 +248,27 @@ def _katex_inline_bundle(frontend_dir_str: str) -> str:
     )
 
 
+def _layout_fit_script(frontend_dir: Path | None) -> str:
+    """frontend/layout-fit.js를 인라인 <script>로. 앱 뷰와 동일한 단일 소스.
+    캐시하지 않고 매번 읽는다(작은 파일 — dev 중 수정이 즉시 반영되도록;
+    lru_cache된 KaTeX 번들과 달리 캐시 키 혼동을 피함). 파일이 없으면
+    빈 문자열 — fitter 없이도 정상 동작(그레이스풀 디그레이드)."""
+    if not frontend_dir:
+        return ""
+    try:
+        js = (Path(frontend_dir) / "layout-fit.js").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    # KaTeX 타이포셋(위 _katex_inline_bundle의 DOMContentLoaded) 뒤에 등록되도록
+    # head에서 katex 다음에 배치한다 → 순서: 타이포셋 → uocrFitLayout(document).
+    return (
+        f"<script>{js}</script>"
+        "<script>window.addEventListener('DOMContentLoaded',function(){"
+        "if(window.uocrFitLayout){try{window.uocrFitLayout(document);}catch(_){}}"
+        "});</script>"
+    )
+
+
 def render_layout_standalone(
     pages: list[dict], job_dir: Path, title: str, frontend_dir: Path | None
 ) -> str:
@@ -201,10 +284,11 @@ def render_layout_standalone(
 
     body = render_layout_html(pages, files_base_url="", image_src=_inline_image)
     katex = _katex_inline_bundle(str(frontend_dir)) if frontend_dir else ""
+    fitter = _layout_fit_script(frontend_dir)  # katex 뒤에 배치 → 타이포셋 후 실행
     return (
         '<!doctype html>\n<html lang="ko">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{escapeHtml(title)}</title>\n"
-        f"<style>{_STANDALONE_CSS}</style>\n{katex}\n</head>\n"
+        f"<style>{_STANDALONE_CSS}</style>\n{katex}\n{fitter}\n</head>\n"
         f'<body><main class="doclayout-body">\n{body}\n</main></body>\n</html>\n'
     )

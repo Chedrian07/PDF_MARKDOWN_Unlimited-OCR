@@ -1521,6 +1521,7 @@ async function loadDocLayout() {
   // Trusted server-rendered fragment (pipeline/layout.py — 텍스트 전부 이스케이프됨).
   el.doclayoutBody.innerHTML = html;
   typesetMath(el.doclayoutBody);
+  if (window.uocrFitLayout) window.uocrFitLayout(el.doclayoutBody);
 }
 
 async function loadPreview() {

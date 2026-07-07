@@ -915,8 +915,11 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 .markdown-body img { border-radius: 4px; }
 
 /* ── 좌표 레이아웃 뷰 (Phase B — /jobs/{id}/layout) ──────────────────── */
-/* 웹 폰트가 원본과 달라 텍스트가 박스를 넘치거나 남을 수 있는 best-effort
-   재현 — overflow:hidden 처리. 정확한 텍스트는 마크다운 뷰 참조. */
+/* ⚠ SYNC: backend/app/pipeline/layout.py의 _STANDALONE_CSS와 시각적으로 동기
+   유지할 것 (.layout-block의 pre-wrap/justify/serif, .layout-canvas의
+   container-type 포함). */
+/* 서버가 면적 기반 폰트 크기(cqw)를 인라인하고, 클라이언트(layout-fit.js)가
+   넘치는 블록을 축소해 맞춘다 — best-effort 재현. 정확한 텍스트는 마크다운 뷰. */
 .doclayout-body { display: grid; gap: 22px; }
 .layout-page { position: relative; max-width: 860px; width: 100%; margin-inline: auto; }
 .layout-page::before {
@@ -936,8 +939,23 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
   border-radius: 6px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
   overflow: hidden;
+  /* cqw 폰트 단위(layout.py estimate_font_size_cqw)의 기준 컨테이너 */
+  container-type: inline-size;
 }
-.layout-block { position: absolute; overflow: hidden; font-size: 11px; line-height: 1.35; color: #1a1c22; padding: 1px 3px; }
+/* 문서 뷰이므로 레이아웃 전체를 세리프로 — pre-wrap로 줄바꿈 보존(목록 병합 방지),
+   justify+hyphens로 문단 정렬. .layout-table도 이 세리프 스택을 상속한다. */
+.layout-block {
+  position: absolute;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #1a1c22;
+  padding: 1px 3px;
+  white-space: pre-wrap;
+  text-align: justify;
+  hyphens: auto;
+  font-family: Georgia, 'Times New Roman', 'Noto Serif KR', serif;
+}
 .layout-title { font-weight: 700; font-size: 14px; color: #b0262c; }
 .layout-image { object-fit: contain; padding: 0; }
 .layout-table { font-size: 9px; }

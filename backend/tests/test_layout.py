@@ -1,9 +1,18 @@
 import json
+import re
 from pathlib import Path
 
-from app.pipeline.layout import parse_page_blocks, render_layout_html, render_layout_standalone
+from app.pipeline.layout import (
+    estimate_font_size_cqw,
+    parse_page_blocks,
+    render_layout_html,
+    render_layout_standalone,
+)
 from app.pipeline.merge import ChunkResult, IncrementalMerger
 from app.pipeline.render import text_with_math_html
+
+# 실제 frontend 디렉터리 (repo/frontend) — layout-fit.js / KaTeX 자산 존재 확인용.
+FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
 
 RAW = (
     "<|det|>title [100, 50, 800, 100]<|/det|>문서 제목\n"
@@ -85,6 +94,84 @@ def test_layout_blocks_render_math_spans():
     assert "\\(" not in html and "\\[" not in html
 
 
+# ── 면적 기반 폰트 크기 추정 (cqw) ─────────────────────────────────────
+def test_estimate_font_size_calibration():
+    # 교정: A4 전폭 문단(ASCII 600자, aspect 1.414)은 목표 1.05–1.7cqw
+    # (≈9–15px @ 860px 캔버스). _AREA_FILL=4.1이면 구간 중앙 ≈1.35cqw.
+    fs = estimate_font_size_cqw((60, 100, 940, 280), "x" * 600, 1.414)
+    assert fs is not None
+    assert 1.05 <= fs <= 1.7, fs
+
+
+def test_estimate_cjk_smaller_than_ascii():
+    # 같은 글자수라도 CJK는 가중치(1.0)가 ASCII(0.5)보다 커서 더 작은 fs가 나온다.
+    box = (60, 100, 940, 280)
+    ascii_fs = estimate_font_size_cqw(box, "x" * 300, 1.414)
+    cjk_fs = estimate_font_size_cqw(box, "가" * 300, 1.414)
+    assert ascii_fs is not None and cjk_fs is not None
+    assert cjk_fs < ascii_fs
+
+
+def test_estimate_single_line_title_cap():
+    # 얕은 박스의 짧은 제목 — 면적 모델은 크게 잡지만 단일 줄 상한(h/1.25)이 눌러야 함.
+    bbox = (100, 50, 900, 75)
+    fs = estimate_font_size_cqw(bbox, "Title", 1.414)
+    h = (75 - 50) / 999 * 100 * 1.414
+    cap = h / 1.25
+    assert fs is not None
+    assert abs(fs - cap) < 0.02, (fs, cap)
+    assert cap < 3.6  # 클램프가 아니라 '상한'이 작동함을 보장
+
+
+def test_estimate_clamps_hold_at_extremes():
+    # 상한: 큰 박스 + 극소 글자수 → 3.6 클램프
+    hi = estimate_font_size_cqw((100, 100, 200, 900), "xx", 1.414)
+    assert hi == 3.6
+    # 하한: 큰 박스 + 초대량 글자수 → 0.8 클램프
+    lo = estimate_font_size_cqw((0, 0, 999, 999), "가" * 50000, 1.414)
+    assert lo == 0.8
+
+
+def test_estimate_empty_and_none_safe():
+    box = (60, 100, 940, 280)
+    assert estimate_font_size_cqw(box, "", 1.414) is None
+    assert estimate_font_size_cqw(box, "   ", 1.414) is None
+    assert estimate_font_size_cqw(box, "<table></table>", 1.414) is None  # 태그만 → 빈 텍스트
+    assert estimate_font_size_cqw(None, "본문", 1.414) is None
+    assert estimate_font_size_cqw((1, 2, 3), "본문", 1.414) is None  # 비정상 bbox
+
+
+def test_render_layout_html_font_size_cqw_text_not_image():
+    pages = [{"page": 1, "width": 1000, "height": 1414, "blocks": [
+        {"type": "text", "bbox": [60, 100, 940, 280], "content": "본문 텍스트 예시 " * 30},
+        {"type": "image", "bbox": [100, 400, 600, 800], "content": "", "image": "p0001_0.jpg"},
+    ]}]
+    html = render_layout_html(pages, "/b")
+    text_div = re.search(r'<div class="layout-block layout-text"[^>]*>', html).group(0)
+    assert "font-size:" in text_div and "cqw" in text_div
+    assert "line-height:1.32" in text_div
+    # 이미지 블록엔 폰트 크기 인라인이 없어야 함
+    img_tag = re.search(r'<img class="layout-block layout-image"[^>]*>', html).group(0)
+    assert "cqw" not in img_tag and "font-size:" not in img_tag
+
+
+def test_layout_standalone_includes_fitter_after_typeset(tmp_path):
+    (tmp_path / "images").mkdir()
+    pages = [{"page": 1, "width": 1000, "height": 1400, "blocks": [
+        {"type": "text", "bbox": [60, 100, 940, 280], "content": "본문 텍스트 " * 40},
+    ]}]
+    html = render_layout_standalone(pages, tmp_path, "문서", FRONTEND_DIR)
+    assert "window.uocrFitLayout" in html          # fitter 정의 인라인됨
+    assert "uocrFitLayout(document)" in html        # 문서 전체에 호출
+    assert html.index("window.uocrFitLayout") < html.index("uocrFitLayout(document)")
+    assert "cqw" in html                            # 서버가 심은 면적 기반 폰트 크기
+    assert "white-space: pre-wrap" in html          # 문서 타이포(줄바꿈 보존)
+    assert "container-type: inline-size" in html    # cqw 기준 컨테이너
+    if (FRONTEND_DIR / "vendor" / "katex" / "katex.min.js").is_file():
+        # 순서: KaTeX 타이포셋 → uocrFitLayout(document)
+        assert html.index("katex.render") < html.index("uocrFitLayout(document)")
+
+
 def test_layout_standalone_self_contained(tmp_path):
     (tmp_path / "images").mkdir()
     (tmp_path / "images" / "p0001_0.jpg").write_bytes(b"\xff\xd8fakejpg")
@@ -93,14 +180,13 @@ def test_layout_standalone_self_contained(tmp_path):
         {"type": "image", "bbox": [100, 100, 800, 600], "content": "", "image": "p0001_0.jpg"},
         {"type": "image", "bbox": [100, 700, 300, 900], "content": "", "image": "missing.jpg"},
     ]}]
-    frontend_dir = Path(__file__).resolve().parents[3] / "frontend"
-    html = render_layout_standalone(pages, tmp_path, "테스트 문서", frontend_dir)
+    html = render_layout_standalone(pages, tmp_path, "테스트 문서", FRONTEND_DIR)
     assert html.startswith("<!doctype html>")
     assert "<title>테스트 문서</title>" in html
     assert "data:image/jpeg;base64," in html          # 크롭 인라인
     assert 'src="data:,"' in html                      # 결측 크롭 폴백
     assert '<span class="math-inline">x</span>' in html
-    if (frontend_dir / "vendor" / "katex" / "katex.min.js").is_file():
+    if (FRONTEND_DIR / "vendor" / "katex" / "katex.min.js").is_file():
         assert "katex" in html and "data:font/woff2;base64," in html  # KaTeX 자립 인라인
     # 외부 참조 없음 (자립성)
     assert 'src="http' not in html and 'href="http' not in html
