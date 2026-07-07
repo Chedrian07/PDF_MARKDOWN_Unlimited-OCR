@@ -31,6 +31,11 @@ SINGLE_NGRAM_WINDOW = 128
 # 사용자 노출 디바이스명(OCR_DEVICE) → torch 디바이스 문자열
 _TORCH_DEVICES = {"cpu": "cpu", "cuda": "cuda", "metal": "mps"}
 
+# from_pretrained의 meta-디바이스 초기화(init_empty_weights)는 nn.Module.register_parameter를
+# 프로세스 전역으로 몽키패치한다 — 동시 호출 시 다른 스레드가 로드한 가중치가 meta로 되돌아가
+# .to(device)가 "Cannot copy out of meta tensor"로 실패. 프로세스 전체에서 직렬화해야 안전하다.
+_LOAD_LOCK = threading.Lock()
+
 
 def torch_device_name(device: str) -> str:
     return _TORCH_DEVICES.get(device, device)
@@ -100,8 +105,15 @@ class UnlimitedEngine(OCREngine):
         return self._model is not None
 
     def load(self) -> None:
+        # 프리로드 스레드(main)와 워커 스레드(jobs)가 동시에 진입할 수 있다 —
+        # 늦게 온 쪽은 _LOAD_LOCK에서 완료를 기다렸다가 로드된 모델을 그대로 재사용.
         if self._model is not None:
             return
+        with _LOAD_LOCK:
+            if self._model is None:
+                self._load_locked()
+
+    def _load_locked(self) -> None:
         import torch
         from transformers import AutoTokenizer
 
@@ -143,8 +155,9 @@ class UnlimitedEngine(OCREngine):
             attn_implementation="eager",
         )
         model = model.eval().to(self.torch_device)
-        self._model = model
+        # loaded/load()의 락 없는 빠른 경로가 _model 을 기준으로 판단하므로 마지막에 대입
         self._tokenizer = tokenizer
+        self._model = model
         logger.info("모델 로딩 완료")
 
     def gpu_name(self) -> str | None:

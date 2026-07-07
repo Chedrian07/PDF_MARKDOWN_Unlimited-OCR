@@ -45,7 +45,8 @@ def health(request: Request) -> dict:
         "dtype": engine.dtype_name or st.settings.dtype,
         "model_id": st.settings.model_id,
         "model_loaded": engine.loaded,
-        "model_load_error": st.load_state.get("error"),
+        # 프리로드 실패 후 워커 재시도가 성공하면 과거 오류는 더 이상 유효하지 않다
+        "model_load_error": None if engine.loaded else st.load_state.get("error"),
         "gpu_name": engine.gpu_name(),
         "native_ops": native_ops.HAVE_NATIVE,
     }

@@ -55,6 +55,55 @@ def test_resolve_dtype():
         _resolve_dtype("metal", "int8")
 
 
+def test_load_concurrent_calls_load_once(monkeypatch):
+    # 프리로드 스레드와 워커 스레드가 load()에 동시 진입해도 from_pretrained는
+    # 정확히 1회만 실행돼야 한다 (동시 로드 → meta 텐서 잔류 → .to() 실패 회귀 방지)
+    pytest.importorskip("torch")
+    import threading
+    import time
+
+    import transformers
+
+    from app.engine.unlimited import UnlimitedEngine
+    from app.vendor.unlimited_ocr import UnlimitedOCRForCausalLM
+
+    calls: list[int] = []
+
+    class _FakeModel:
+        def eval(self):
+            return self
+
+        def to(self, device):
+            return self
+
+    def _fake_model_fp(*args, **kwargs):
+        calls.append(1)
+        time.sleep(0.2)  # 두 번째 스레드가 로딩 도중에 진입하도록 지연
+        return _FakeModel()
+
+    monkeypatch.setattr(UnlimitedOCRForCausalLM, "from_pretrained", _fake_model_fp)
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
+                        lambda *a, **k: object())
+
+    eng = UnlimitedEngine(Settings(engine="unlimited", device="cpu", preload_model=False))
+    errors: list[Exception] = []
+
+    def _load():
+        try:
+            eng.load()
+        except Exception as e:  # noqa: BLE001 — 스레드 안 예외를 본문으로 전달
+            errors.append(e)
+
+    threads = [threading.Thread(target=_load) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert not errors
+    assert len(calls) == 1
+    assert eng.loaded
+
+
 def test_health_reports_metal(tmp_path):
     from fastapi.testclient import TestClient
 

@@ -47,7 +47,10 @@ class OCREngine(abc.ABC):
 
     @abc.abstractmethod
     def load(self) -> None:
-        """모델/리소스 로드 (멱등, 스레드 세이프하지 않음 — 호출측에서 직렬화)."""
+        """모델/리소스 로드 (멱등·스레드 세이프 — 동시 호출 시 한쪽만 로드, 나머지는 완료 대기).
+
+        프리로드 스레드(main)와 워커 스레드(jobs)가 동시에 호출할 수 있다.
+        """
 
     @abc.abstractmethod
     def run_multi(
