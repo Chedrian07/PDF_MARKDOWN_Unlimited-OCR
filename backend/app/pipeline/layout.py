@@ -145,9 +145,14 @@ def estimate_font_size_cqw(bbox, content: str, page_aspect: float) -> float | No
     return max(0.8, min(3.6, fs))   # cqw 클램프 [0.8, 3.6]
 
 
-def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -> str:
+def render_layout_html(
+    pages: list[dict], files_base_url: str, image_src=None, lang: str | None = None
+) -> str:
     """layout.json(merge가 통합한 페이지 블록들) → 절대 배치 HTML 프래그먼트.
-    image_src(name)->str 을 주면 이미지 src를 그 값으로 (standalone의 data URI용)."""
+    image_src(name)->str 을 주면 이미지 src를 그 값으로 (standalone의 data URI용).
+    lang을 주면 최상위 컨테이너(.doclayout-body)에 lang 속성을 부여해
+    `[lang="ko"] .layout-block` 규칙(한글 서리프·word-break)이 적용되게 한다.
+    (standalone은 <main>에 직접 lang을 넣으므로 여기로 전달하지 않는다.)"""
     sections: list[str] = []
     for p in pages:
         width = p.get("width") or 1000
@@ -217,7 +222,12 @@ def render_layout_html(pages: list[dict], files_base_url: str, image_src=None) -
             + "".join(blocks_html)
             + "</div></section>"
         )
-    return "\n".join(sections)
+    inner = "\n".join(sections)
+    if lang:
+        # 페이지 섹션을 감싸는 최상위 컨테이너. .doclayout-body 클래스를 유지해
+        # 인앱 주입 시(#doclayout-body 안) 페이지 간 그리드 간격이 보존된다.
+        return f'<div class="doclayout-body" lang="{lang}">\n{inner}\n</div>'
+    return inner
 
 
 # ── standalone HTML (다운로드용 단일 파일 — PDF 대응 뷰) ─────────────────
@@ -239,6 +249,9 @@ body { background: #eceef2; font-family: system-ui, -apple-system, 'Apple SD Got
 .layout-formula, .layout-equation { font-size: 11px; display: flex; align-items: center; justify-content: center; }
 .layout-page_number, .layout-header, .layout-footer, .layout-footnote { opacity: .45; font-size: 9px; }
 .layout-block .math-display { display: block; text-align: center; }
+/* ⚠ SYNC: frontend/styles.css에도 동일 규칙 (번역 뷰 한글 타이포) — 앱의 <html lang="ko">에
+   오적용되지 않도록 lang을 받는 래퍼(.doclayout-body) 자체에 스코프 */
+.doclayout-body[lang="ko"] .layout-block { font-family: "Noto Serif KR", "Source Han Serif K", "Apple SD Gothic Neo", "Malgun Gothic", serif; word-break: keep-all; }
 .layout-vertical-up { writing-mode: sideways-lr; white-space: nowrap; text-align: center; }
 .layout-vertical-down { writing-mode: vertical-rl; white-space: nowrap; text-align: center; }
 @media print { body { background: #fff; padding: 0; } .layout-page { break-inside: avoid; } }
@@ -297,9 +310,13 @@ def _layout_fit_script(frontend_dir: Path | None) -> str:
 
 
 def render_layout_standalone(
-    pages: list[dict], job_dir: Path, title: str, frontend_dir: Path | None
+    pages: list[dict], job_dir: Path, title: str, frontend_dir: Path | None,
+    lang: str | None = None,
 ) -> str:
-    """이미지 base64·KaTeX 인라인의 완전 자립형 HTML 문서 — 오프라인에서 그대로 열림."""
+    """이미지 base64·KaTeX 인라인의 완전 자립형 HTML 문서 — 오프라인에서 그대로 열림.
+    lang을 주면 <html>·<main>에 lang 속성을 부여해 번역본에 `[lang="ko"] .layout-block`
+    (한글 서리프·word-break) 규칙이 적용된다. 원본(lang=None)에는 lang을 붙이지 않아
+    비한국어 문서에 한글 타이포가 잘못 적용되는 것을 막는다."""
 
     def _inline_image(name: str) -> str:
         p = job_dir / "images" / name
@@ -309,13 +326,15 @@ def render_layout_standalone(
         except OSError:
             return "data:,"  # 결측 크롭 — 빈 이미지로 폴백
 
+    # body에는 lang을 전달하지 않는다 — 컨테이너(<main>)에서 한 번만 부여.
     body = render_layout_html(pages, files_base_url="", image_src=_inline_image)
     katex = _katex_inline_bundle(str(frontend_dir)) if frontend_dir else ""
     fitter = _layout_fit_script(frontend_dir)  # katex 뒤에 배치 → 타이포셋 후 실행
+    lang_attr = f' lang="{lang}"' if lang else ""
     return (
-        '<!doctype html>\n<html lang="ko">\n<head>\n<meta charset="utf-8">\n'
+        f'<!doctype html>\n<html{lang_attr}>\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{escapeHtml(title)}</title>\n"
         f"<style>{_STANDALONE_CSS}</style>\n{katex}\n{fitter}\n</head>\n"
-        f'<body><main class="doclayout-body">\n{body}\n</main></body>\n</html>\n'
+        f'<body><main class="doclayout-body"{lang_attr}>\n{body}\n</main></body>\n</html>\n'
     )

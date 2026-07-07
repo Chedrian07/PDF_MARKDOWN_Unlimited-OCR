@@ -53,6 +53,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.worker = worker
     app.state.cancel_events = cancel_events
     app.state.load_state = load_state
+    # 번역 태스크 레지스트리: 키 (job_id, lang) → {"thread","cancel"}.
+    # OCR 워커(단일 스레드 직렬)와 달리 번역은 잡별 데몬 스레드로 병렬 실행된다.
+    app.state.translate_tasks: dict[tuple[str, str], dict] = {}
+    app.state.translate_lock = threading.Lock()
 
     app.include_router(router)
 
