@@ -186,3 +186,18 @@ def test_archive_before_done_conflicts(client, sample_pdf, settings):
     jid = _upload(client, sample_pdf).json()["job_id"]
     r = client.get(f"/api/jobs/{jid}/archive")
     assert r.status_code in (200, 409)
+
+
+def test_result_block_has_layout_플래그(tmp_path):
+    """레이아웃 기능(P14) 이전에 변환된 잡은 layout.json이 없어 /layout*이 404 —
+    프런트가 버튼을 비활성화할 수 있도록 결과 블록에 has_layout을 내려준다."""
+    from app.jobs import Job
+
+    old = Job(id="j_old", filename="a.pdf", mode="multi", dpi=200, dir=tmp_path / "old", status="done")
+    old.dir.mkdir()
+    assert old.to_dict()["result"]["has_layout"] is False
+
+    new = Job(id="j_new", filename="b.pdf", mode="multi", dpi=200, dir=tmp_path / "new", status="done")
+    new.dir.mkdir()
+    (new.dir / "layout.json").write_text("[]", encoding="utf-8")
+    assert new.to_dict()["result"]["has_layout"] is True

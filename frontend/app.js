@@ -1455,9 +1455,16 @@ function renderResult(job) {
   state.resultUrls = {
     markdown: r.markdown_url,
     archive: r.archive_url,
-    layoutHtml: `/api/jobs/${job.job_id}/layout.html`,
+    // 레이아웃 기능 이전에 변환된 옛 잡(layout.json 없음)은 /layout.html이 404 —
+    // 눌러도 조용히 실패하는 버튼 대신 비활성화한다 (has_layout 미제공 구버전 응답은 허용)
+    layoutHtml: r.has_layout === false ? null : `/api/jobs/${job.job_id}/layout.html`,
   };
   applyDownloadLangs(); // currentLang='orig' → 원문 URL로 세팅
+  if (r.has_layout === false) {
+    el.dlLayout.title = '이 작업은 구버전 변환이라 레이아웃 데이터가 없습니다 — PDF를 다시 변환하면 생깁니다';
+  } else {
+    el.dlLayout.removeAttribute('title');
+  }
 
   renderThumbGrid(el.layoutsGrid, r.layouts, '레이아웃 이미지가 없습니다.');
   renderThumbGrid(el.pagesGrid, r.pages, '원본 페이지 이미지가 없습니다.');
@@ -1851,7 +1858,13 @@ async function loadDocLayout() {
     return;
   }
   if (html == null) {
-    el.doclayoutBody.appendChild(h('p', { class: 'muted', text: '레이아웃 뷰를 불러오지 못했습니다.' }));
+    const noLayout = state.resultUrls && state.resultUrls.layoutHtml === null;
+    el.doclayoutBody.appendChild(h('p', {
+      class: 'muted',
+      text: noLayout
+        ? '이 작업은 레이아웃 기능 이전에 변환되어 레이아웃 데이터가 없습니다 — PDF를 다시 변환하면 생깁니다.'
+        : '레이아웃 뷰를 불러오지 못했습니다.',
+    }));
     return;
   }
   state.docLayoutLoaded = true;

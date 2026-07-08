@@ -69,6 +69,10 @@ class Job:
             "images": _urls("images"),
             "layouts": _urls("layout"),
             "pages": _urls("pages"),
+            # 레이아웃 뷰/다운로드 가능 여부 — 레이아웃 기능(P14) 이전에 변환된
+            # 잡에는 layout.json이 없어 /layout*이 404가 난다. 프런트가 이 플래그로
+            # 버튼을 비활성화한다 (없으면 재변환 필요).
+            "has_layout": (self.dir / "layout.json").is_file(),
         }
 
     def to_dict(self) -> dict:
