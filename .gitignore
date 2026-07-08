@@ -13,8 +13,9 @@ native/_skbuild/
 native/build/
 *.so
 
-# Data / runtime
-data/
+# Data / runtime (런타임 잡 데이터만 — 앱 내장 데이터 backend/app/**/data/ 는 추적)
+/data/
+/backend/data/
 *.log
 sample/e2e-*/
 nohup.out
