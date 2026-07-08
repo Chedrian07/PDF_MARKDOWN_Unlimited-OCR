@@ -9,6 +9,33 @@ from pathlib import Path
 _DEFAULT_REVISION = "ee63731b6461c8afcdcc7b15352e7d2ffecc2ead"
 
 
+def load_dotenv_file(path: Path | None = None) -> None:
+    """리포 루트 .env를 os.environ에 주입 — **이미 설정된 키는 건드리지 않는다**.
+
+    docker-compose는 .env를 읽어 environment로 넘기지만(그 값이 우선 유지됨),
+    로컬 실행(macOS Metal 등)은 아무도 .env를 읽지 않아 번역 프로바이더가
+    503("프로바이더 미설정")으로 떨어졌다 — CPU/CUDA/Metal 범용성 결함 수정.
+    파서는 KEY=VALUE 한 줄 형식만 지원하고 주석(#)·빈 줄을 건너뛰며,
+    compose와 동일하게 값 양끝 따옴표를 벗긴다.
+    """
+    if path is None:
+        for base in (Path.cwd(), Path(__file__).resolve().parents[2]):
+            cand = base / ".env"
+            if cand.is_file():
+                path = cand
+                break
+    if path is None or not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip().strip("'\"")
+        if k:
+            os.environ.setdefault(k, v)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     v = os.environ.get(name)
     if v is None:
@@ -44,6 +71,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        load_dotenv_file()  # 로컬 실행(Metal 등)에서도 .env의 번역/OCR 설정이 잡히게
         sep = os.environ.get("PAGE_SEPARATOR")
         frontend = os.environ.get("FRONTEND_DIR")
         device = os.environ.get("OCR_DEVICE", "cpu").strip().lower()
