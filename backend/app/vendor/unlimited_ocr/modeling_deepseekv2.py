@@ -623,7 +623,13 @@ class DeepseekV2MoE(nn.Module):
             y = y.to(hidden_states.dtype).view(*orig_shape)
             y = AddAuxiliaryLoss.apply(y, aux_loss)
         else:
-            y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+            # [vendor patch P17] 소배치(디코드) & CUDA에서는 융합 경로, 그 외엔 기존 moe_infer.
+            if self._should_use_fused(hidden_states, topk_idx):
+                y = self._moe_infer_fused(hidden_states, topk_idx, topk_weight).view(
+                    *orig_shape
+                )
+            else:
+                y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
         return y
@@ -703,6 +709,103 @@ class DeepseekV2MoE(nn.Module):
             .type(new_x.dtype)
         )
         return final_out
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # [vendor patch P17] 융합 소배치 추론 경로 — batch-1 디코드 CUDA 활용률 개선.
+    # 실측 배경: RTX 5070 Ti에서 batch-1 디코드 ~13 tok/s, sm 21%.
+    # moe_infer의 병목 = (1) tokens_per_expert.cpu().numpy()로 인한 레이어당 GPU→CPU
+    # 동기화(레이어 ~27개 → 토큰당 ~27회, WSL2 왕복 비용 큼), (2) expert별 파이썬
+    # 루프의 소형 커널 난사(토큰 1개에 6 expert x 3 linear), (3) argsort/scatter/cat
+    # 라우팅 기계장치. 소배치에서는 전 expert 가중치를 스택해 index_select + bmm 3방으로
+    # 융합하고 CPU 동기화를 0회로 만든다. 기본 CUDA·소배치 한정 on, OCR_MOE_FUSED=0 킬스위치.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _fused_env_enabled(self):
+        # env는 forward 시점 1회만 조회해 인스턴스에 캐시(P16 _sdpa_env 방식 참고).
+        # "0/false/no/off" 이외 값(미설정 포함)이면 on.
+        v = getattr(self, "_fused_env", None)
+        if v is None:
+            v = os.environ.get("OCR_MOE_FUSED", "").strip().lower() not in (
+                "0",
+                "false",
+                "no",
+                "off",
+            )
+            self._fused_env = v
+        return v
+
+    def _should_use_fused(self, x, topk_ids):
+        # 발동 조건(보수적): 킬스위치 off 아님 · ep_size==1 · CUDA · **디코드(N==1)만**.
+        # 하나라도 어긋나면 기존 moe_infer로 (예외가 아니라 정상 분기).
+        # N>1(짧은 프리필 조각)은 mm↔bmm 누적 순서차(fp round-off)로 근접 argmax가
+        # 뒤집혀 E2E 출력이 갈라진 실측(8p 벤치: 표 colspan 손상 1건 포함) → 제외.
+        # N==1은 expert별 단일행 matmul이라 eager와 bitwise 동일 — 4.4× 가속의
+        # 원천인 토큰 디코드는 전부 N==1이므로 성능 손실 없음.
+        if not self._fused_env_enabled():
+            return False
+        if self.ep_size != 1:
+            return False
+        if not x.is_cuda:
+            return False
+        return x.shape[0] == 1
+
+    def _build_fused_experts(self):
+        # 지연 초기화(첫 fused 호출 시 1회). 전 expert의 gate/up/down weight를 각각
+        # [E, out, in] 텐서로 스택하고, 각 expert Linear의 .weight를 스택의 뷰로 재지정한다.
+        # 재지정 후 기존 개별 텐서는 참조 해제 → VRAM 중복 없음. 기존 moe_infer 루프도
+        # 뷰(연속 블록이라 F.linear 정상)로 계속 동작. 모델 .to() 이후 디바이스/dtype이
+        # 어긋나면 재구축(스테일 스택으로 인한 조용한 오동작 방지).
+        w0 = self.experts[0].gate_proj.weight
+        fw = getattr(self, "_fused_w", None)
+        if fw is not None and fw[0].device == w0.device and fw[0].dtype == w0.dtype:
+            return
+        g = torch.stack([e.gate_proj.weight.data for e in self.experts])  # [E, inter, hidden]
+        u = torch.stack([e.up_proj.weight.data for e in self.experts])  # [E, inter, hidden]
+        d = torch.stack([e.down_proj.weight.data for e in self.experts])  # [E, hidden, inter]
+        for i, e in enumerate(self.experts):
+            e.gate_proj.weight = nn.Parameter(g[i], requires_grad=False)
+            e.up_proj.weight = nn.Parameter(u[i], requires_grad=False)
+            e.down_proj.weight = nn.Parameter(d[i], requires_grad=False)
+        self._fused_w = (g, u, d)
+        # act_fn은 전 expert 공통(config.hidden_act). eager와 bitwise 동일하도록 F.silu를
+        # 하드코딩하지 않고 실제 act_fn을 그대로 참조한다(DeepseekV2MLP은 bias 없음 → 스택 불필요).
+        self._fused_act = self.experts[0].act_fn
+
+    @torch.no_grad()
+    def _moe_infer_fused(self, x, topk_ids, topk_weight):
+        # 소배치 융합 경로. CPU 동기화(.cpu()/.item()/.numpy()) 일절 없음.
+        # 수식은 DeepseekV2MLP.forward와 동일: down(act(gate(x)) * up(x)), bias 없음.
+        #
+        # 수치 판정 기록(실측, 8p 벤치): 융합 여부와 무관하게 **가중치 재스택만으로도**
+        # cuBLAS가 (결정적으로) 다른 커널 변형을 골라 마지막 비트가 달라진다 —
+        # gather+expert별 F.linear(동일 커널) 변형(241s)으로도 legacy와 바이트 차이가
+        # 남았다. 즉 legacy 바이트 파리티는 최적화 포기와 동치라 불가능하고,
+        # 채택한 게이트는 ① 실행 간 결정성(동일 코드 2회 바이트 동일 — 실측 확인)
+        # ② 구조 지표 등가 ③ OCR_MOE_FUSED=0 시 완전 legacy 복원. 그 위에서
+        # 가장 빠른 bmm 3방(191s vs mm 변형 241s)을 쓴다.
+        # 최종 dtype 캐스트 순서는 moe_infer(위 final_out)와 동일.
+        self._build_fused_experts()
+        g_w, u_w, d_w = self._fused_w
+        N = x.shape[0]
+        K = topk_ids.shape[1]
+        flat_ids = topk_ids.reshape(-1)  # [N*K], (token,k) 순서
+        g = g_w.index_select(0, flat_ids)  # [N*K, inter, hidden]
+        u = u_w.index_select(0, flat_ids)  # [N*K, inter, hidden]
+        d = d_w.index_select(0, flat_ids)  # [N*K, hidden, inter]
+        xi = x.repeat_interleave(K, dim=0).unsqueeze(1)  # [N*K, 1, hidden]
+        h = self._fused_act(torch.bmm(xi, g.transpose(1, 2))) * torch.bmm(
+            xi, u.transpose(1, 2)
+        )  # [N*K, 1, inter]
+        out = torch.bmm(h, d.transpose(1, 2)).squeeze(1)  # [N*K, hidden]
+        # (token,k) 순서가 topk_ids.view(N,K)와 정확히 대응 → moe_infer의 최종 합산과 동치.
+        y = (
+            out.view(N, K, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(x.dtype)
+        )
+        return y
 
 
 # Copied from transformers.models.llama.modeling_llama.repeat_kv
