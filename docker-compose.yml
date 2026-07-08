@@ -33,6 +33,12 @@ services:
       OCR_CPU_THREADS: ${OCR_CPU_THREADS:-0}
       OCR_FAST_DECODE: ${OCR_FAST_DECODE:-1}
       OCR_DECODE_BLOCK: ${OCR_DECODE_BLOCK:-8}
+      OCR_CUDA_GRAPHS: ${OCR_CUDA_GRAPHS:-}
+      OCR_MOE_FUSED: ${OCR_MOE_FUSED:-}
+      OCR_MOE_FAST: ${OCR_MOE_FAST:-}
+      OCR_SDPA: ${OCR_SDPA:-}
+      OCR_NGRAM_HOST: ${OCR_NGRAM_HOST:-}
+      CUDA_LAUNCH_BLOCKING: ${CUDA_LAUNCH_BLOCKING:-}
       # ── 한국어 번역 (OpenAI 호환 API) — 미설정 시 번역 기능만 비활성 ──
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -77,6 +83,12 @@ services:
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       OCR_FAST_DECODE: ${OCR_FAST_DECODE:-1}
       OCR_DECODE_BLOCK: ${OCR_DECODE_BLOCK:-8}
+      OCR_CUDA_GRAPHS: ${OCR_CUDA_GRAPHS:-}
+      OCR_MOE_FUSED: ${OCR_MOE_FUSED:-}
+      OCR_MOE_FAST: ${OCR_MOE_FAST:-}
+      OCR_SDPA: ${OCR_SDPA:-}
+      OCR_NGRAM_HOST: ${OCR_NGRAM_HOST:-}
+      CUDA_LAUNCH_BLOCKING: ${CUDA_LAUNCH_BLOCKING:-}
       # ── 한국어 번역 (OpenAI 호환 API) — 미설정 시 번역 기능만 비활성 ──
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

@@ -9,7 +9,7 @@
 
 업스트림 코드는 CUDA 전용(`.cuda()`/`torch.autocast("cuda")` 하드코딩)이라
 CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
-**P1–P15는 `modeling_unlimitedocr.py`**, **P16–P19는 `modeling_deepseekv2.py`**를
+**P1–P15는 `modeling_unlimitedocr.py`**, **P16–P20은 `modeling_deepseekv2.py`**를
 수정했으며 나머지 파일은 원본 그대로다.
 
 ## 패치 목록
@@ -35,5 +35,7 @@ CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
 | P17 | (`modeling_deepseekv2.py`) `DeepseekV2MoE`에 융합 소배치 추론 경로(`_moe_infer_fused`) 추가 — 첫 호출 시 전 expert의 gate/up/down weight를 `[E, out, in]` 텐서로 `torch.stack`하고 각 expert Linear의 `.weight`를 그 스택의 뷰로 재지정(개별 텐서 참조 해제 → VRAM 중복 없음, 기존 `moe_infer` 루프도 뷰로 계속 동작). 디코드에선 `index_select`+`bmm` 3방으로 라우팅·MLP를 융합. **legacy 바이트 파리티는 불가**(가중치 재스택만으로 cuBLAS 커널 선택이 바뀜 — 동일 커널 mm 변형 실측으로 확인) → 채택 게이트: 동일 프로세스 내 결정성(같은 컨테이너 2회 변환 바이트 동일 실측 — 프로세스 재시작 간에는 cuBLASLt 알고리즘 휴리스틱으로 공백/동점 토큰 수준 변동이 legacy 포함 원래 존재)·구조 지표 등가(표/셀/이미지/수식 수 재빌드 간 동일 실측)·`OCR_MOE_FUSED=0` 완전 legacy 복원. **CUDA·디코드(`N==1`)·`ep_size==1` 한정 기본 on** (N>1 프리필 조각은 mm↔bmm 누적차로 근접 argmax 플립 실측 → 제외), `OCR_MOE_FUSED=0/false/no/off`로 킬스위치(env는 forward 1회 조회·캐시) | eval 디코드 병목이 `moe_infer`의 `tokens_per_expert.cpu().numpy()` — MoE 레이어(~27개)마다 GPU→CPU 동기화(WSL2 왕복 큼) + expert별 파이썬 루프의 소형 커널 난사(토큰 1개에 6 expert × 3 linear). 융합 경로는 **CPU 동기화 0회**. 실측 배경: RTX 5070 Ti batch-1 디코드 ~13 tok/s·sm 21%. dtype 캐스트/최종 가중합 순서를 upstream과 동일하게 맞춰 수치 정합 — N=1(디코드) bitwise 동일, N>1은 mm↔bmm 누적 순서차 fp32 round-off(~2e-7)뿐. 발동 조건 밖·`ep_size>1`은 기존 `moe_infer` 그대로 |
 | P18 | (`modeling_deepseekv2.py`) `DeepseekV2MoE.moe_infer`에 단일 토큰(seq==1)·`ep_size==1` 디코드 패스트패스 추가 — **MPS 전용 기본**, `OCR_MOE_FAST=1/0`으로 전 디바이스 강제 on/off (P16 게이트 패턴). P17(CUDA 융합)과 상보 — P17이 발동하지 않는 디바이스에서 `moe_infer` 안에서 동작 | 배치=1 디코드에서 argsort/scatter/cnts 기계장치와 레이어당 호스트 동기화(`tokens_per_expert.cpu()`, 토큰당 11회)를 제거하고 topk 전문가만 직접 실행. P17과 달리 **가중치 재스택 없이** 기존 expert 뷰 루프만 사용 → 전문가 연산과 최종 가중합(`view→type→mul_→sum→type`)의 연산 순서가 원본과 동일해 **결과 비트 동일**(M4 Max 골든 실측: 2p·25p result.md sha256 동일, 합성 벤치 `torch.equal`=True). MPS 디스패치 바운드 완화용(2p 2.0x·25p 1.86x). 원본(비패스트패스) 경로는 불변 |
 | P19 | (`modeling_deepseekv2.py`) `SlidingWindowLlamaAttention`에 rotary cos/sin 스텝 캐시(`_rope_cached`) 추가 — layer 0가 계산해 캐시 객체(past_kv)에 스태시, 레이어 1+는 **동일 텐서를 재사용** | rotary 출력은 position_ids·dtype에만 의존해 한 스텝의 전 레이어가 같은 값을 중복 계산 → 스텝당 rotary 계산을 레이어 수회에서 1회로 축소. **동일 텐서 재사용이라 결과 비트 동일**. layer 0는 키 일치와 무관하게 항상 재계산·갱신하므로 스텝 간 `id()` 재사용 충돌에도 안전(레이어 실행 순서 항상 0→N). 게이트 없이 전 디바이스 적용 |
+
+| P20 | (`modeling_deepseekv2.py`) `SlidingWindowLlamaAttention.forward`의 **디코드 정상상태(링) 분기**에서 링 위치 상태를 파이썬 int(`past_kv._ring_pos` dict)에서 **디바이스 상주 0-dim int64 텐서**(`past_kv._ring_pos_t` dict)로 전환. 캐시 슬롯 쓰기를 슬라이스 대입(`kcache[:, :, slot:slot+1] = …`)에서 `kcache.index_copy_(2, (ring_pos_t+prefill_len).view(1), …)`로, 슬롯 갱신을 `ring_pos_t.add_(1).remainder_(W)`(텐서 in-place)로 재구성. 파이썬 int 경로는 **폴백 없이 폐기·단일화**(이중 상태 = 버그 온상). `_prefill_length`는 캡처 시점 고정 상수라 int dict 유지 | app/engine/fast_decode.py의 **CUDA Graph 디코드 캡처(U2)**가 성립하려면 링 슬롯 인덱싱·갱신이 캡처 안에서 재생 가능한 텐서 연산이어야 함(파이썬 int 갱신은 캡처에 기록되지 않아 리플레이 시 같은 슬롯만 덮어씀). `index_copy_`는 슬라이스 대입과 **저장 값 동일**, `remainder_`는 `%`와 동일 → **CPU/MPS/CUDA 전 백엔드 공통 적용, 출력 불변**. P16(SDPA)·P17/P18(MoE)·P19(rotary 캐시)와 무접촉 — P19의 `_rope_cached` 호출·어텐션 스코어 경로 그대로. 그래프 캡처 자체는 CUDA·정상상태 한정(`OCR_CUDA_GRAPHS` 킬스위치, 실패 시 eager 폴백)이라 이 텐서화만으로 비CUDA/비그래프 동작은 값 불변 |
 
 업스트림 갱신 시: 새 revision을 받아 이 패치들을 재적용하고 이 문서를 갱신할 것.

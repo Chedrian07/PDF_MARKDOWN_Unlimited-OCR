@@ -1504,20 +1504,27 @@ class SlidingWindowLlamaAttention(LlamaAttention):
             result = _attn_forward()
             new_len = _get_kcache(past_kv, self.layer_idx).shape[-2]
             if new_len >= prefill_len + W:
-                if not hasattr(past_kv, '_ring_pos'):
-                    past_kv._ring_pos = {}
-                past_kv._ring_pos[self.layer_idx] = 0
+                # [vendor patch P20] 링 위치를 디바이스 상주 0-dim int64 텐서로 유지 —
+                # CUDA Graph 캡처(app/engine/fast_decode.py)가 캡처 안에서 슬롯 인덱싱·
+                # 갱신을 재생할 수 있어야 하기 때문(파이썬 int 갱신은 캡처 불가).
+                # 파이썬 int 상태(_ring_pos dict)는 폐기하고 텐서(_ring_pos_t)로
+                # 단일화한다(이중 상태는 버그 온상). 저장 값·수치는 슬라이스 대입과
+                # 완전 동일 — CPU/MPS/CUDA 전 백엔드 공통 적용, 출력 불변.
+                if not hasattr(past_kv, '_ring_pos_t'):
+                    past_kv._ring_pos_t = {}
+                past_kv._ring_pos_t[self.layer_idx] = torch.zeros(
+                    (), dtype=torch.long, device=_get_kcache(past_kv, self.layer_idx).device
+                )
             return result
 
         # Steady state: ring in-place overwrite
-        if not hasattr(past_kv, '_ring_pos') or self.layer_idx not in past_kv._ring_pos:
-            past_kv._ring_pos = getattr(past_kv, '_ring_pos', {}) or {}
-            past_kv._ring_pos[self.layer_idx] = 0
-
-        # Ring decode: overwrite ring slots, then attention over full cache
-        ring_pos = past_kv._ring_pos[self.layer_idx]
+        # [vendor patch P20] _ring_pos(int dict) → _ring_pos_t(0-dim int64 텐서 dict).
         kcache = _get_kcache(past_kv, self.layer_idx)
         vcache = _get_vcache(past_kv, self.layer_idx)
+        if not hasattr(past_kv, '_ring_pos_t') or self.layer_idx not in past_kv._ring_pos_t:
+            past_kv._ring_pos_t = getattr(past_kv, '_ring_pos_t', {}) or {}
+            past_kv._ring_pos_t[self.layer_idx] = torch.zeros((), dtype=torch.long, device=kcache.device)
+        ring_pos_t = past_kv._ring_pos_t[self.layer_idx]
 
         # Compute new K, V and apply RoPE, then overwrite ring slots
         query_states = self.q_proj(hidden_states).view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
@@ -1526,13 +1533,15 @@ class SlidingWindowLlamaAttention(LlamaAttention):
         cos, sin = self._rope_cached(past_kv, value_states, position_ids)
         query_states, key_states = _llama_apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        # Overwrite ring slots in-place
+        # [vendor patch P20] 슬롯 쓰기: 슬라이스 대입 → index_copy_(저장 값 동일, 그래프
+        # 재생 가능). 슬롯 갱신도 텐서 in-place(add_/remainder_ ≡ +1 % W) — 캡처 안에서
+        # 리플레이된다. abs_slot = prefill_len + ring_pos_t (링 영역은 prefill 뒤 W칸).
+        # q_len>1(스테디 상태에 다중 토큰 조각이 오는 경우)에도 t 루프가 텐서 슬롯으로 동작.
         for t in range(q_len):
-            slot = prefill_len + ring_pos
-            kcache[:, :, slot:slot + 1, :] = key_states[:, :, t:t + 1, :]
-            vcache[:, :, slot:slot + 1, :] = value_states[:, :, t:t + 1, :]
-            ring_pos = (ring_pos + 1) % W
-        past_kv._ring_pos[self.layer_idx] = ring_pos
+            abs_slot = (ring_pos_t + prefill_len).view(1)
+            kcache.index_copy_(2, abs_slot, key_states[:, :, t:t + 1, :])
+            vcache.index_copy_(2, abs_slot, value_states[:, :, t:t + 1, :])
+            ring_pos_t.add_(1).remainder_(W)
 
         # Attention over full cache (no causal mask needed for decode q_len=1)
         k = _llama_repeat_kv(kcache, num_kv_groups)
