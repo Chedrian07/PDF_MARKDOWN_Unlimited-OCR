@@ -119,7 +119,13 @@ class HostSlidingWindowNoRepeatNgram:
 
 def make_ngram_logits_processor(ngram_size: int, window: int, device_type: str = "cpu") -> list:
     """generate()에 넘길 logits_processor 리스트를 디바이스에 맞게 생성.
-    device_type: torch 디바이스 문자열 (cpu | cuda | mps)"""
-    if device_type in ("cuda", "mps"):
+    device_type: torch 디바이스 문자열 (cpu | cuda | mps)
+
+    OCR_NGRAM_HOST=1이면 GPU/MPS에서도 호스트(C++/파이썬) 티어를 강제한다 —
+    MPS scatter류 이슈(P11 전례) 절연용 디버그 레버."""
+    import os
+
+    force_host = os.environ.get("OCR_NGRAM_HOST", "").strip().lower() in ("1", "true", "yes", "on")
+    if device_type in ("cuda", "mps") and not force_host:
         return [TorchSlidingWindowNoRepeatNgram(ngram_size, window)]
     return [HostSlidingWindowNoRepeatNgram(ngram_size, window)]

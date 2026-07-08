@@ -9,9 +9,10 @@
 
 업스트림 코드는 CUDA 전용(`.cuda()`/`torch.autocast("cuda")` 하드코딩)이라
 CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
-**`modeling_unlimitedocr.py`만 수정**했으며 나머지 파일은 원본 그대로다.
+**P1–P15는 `modeling_unlimitedocr.py`**, **P16은 `modeling_deepseekv2.py`**를
+수정했으며 나머지 파일은 원본 그대로다.
 
-## 패치 목록 (modeling_unlimitedocr.py)
+## 패치 목록
 
 | # | 내용 | 이유 |
 |---|---|---|
@@ -30,5 +31,6 @@ CPU 백엔드 지원을 위해 벤더링 후 아래 패치를 적용했다.
 | P13 | `draw_bounding_boxes`가 figure 크롭 bbox(픽셀)+페이지 크기를 `{output_path}/boxes.json`으로 export | 업스트림은 크롭 후 좌표를 버림 — 렌더 레이어가 원본 페이지 대비 상대 폭으로 figure를 표시하는 데 필요 (마크다운 출력 계약 불변, 파일 추가만) |
 | P14 | `infer`/`infer_multi`의 save_results가 치환 전 페이지 원문을 `{output_path}/raw_pages.json`으로 export | 좌표 기반 레이아웃 뷰(전 블록 type/bbox/텍스트)가 필요 — 구조 파싱은 앱 코드(pipeline/layout.py)에서 수행해 벤더 변경을 dump 한 줄로 최소화 (마크다운 계약 불변) |
 | P15 | `infer`/`infer_multi`에 `generate_fn=None` 파라미터 추가 — 있으면 `self.generate` 대신 호출 | 커스텀 디코드 루프(app/engine/fast_decode.py — 호스트 동기화 블록 배칭, cpu/cuda/mps 공용) 주입용. 기본값 None이면 업스트림과 동일 동작. HF generate의 토큰당 동기화·기계장치가 측정된 디코드 병목이었음 |
+| P16 | (`modeling_deepseekv2.py`) `SlidingWindowLlamaAttention`의 prefill·디코드 어텐션을 SDPA 융합 커널로 — **CUDA 전용 기본**, `OCR_SDPA=1/0`으로 전 디바이스 강제 on/off | eager(matmul→fp32 softmax→matmul)의 어텐션 행렬 물질화·다중 디스패치 제거 (CUDA 골든 파리티 검증). **MPS 실측(M1 Max, torch 2.10.0): SDPA fused 커널이 로짓을 오염시켜 디코드가 반복 붕괴**(P12 autocast 오염과 같은 계열) → MPS/CPU는 원본 eager(fp32 softmax) 유지 |
 
 업스트림 갱신 시: 새 revision을 받아 이 패치들을 재적용하고 이 문서를 갱신할 것.

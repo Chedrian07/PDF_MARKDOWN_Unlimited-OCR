@@ -103,3 +103,18 @@ def test_make_processor_tiers():
     assert isinstance(mps_proc[0], native_ops.TorchSlidingWindowNoRepeatNgram)
     cpu_proc = native_ops.make_ngram_logits_processor(35, 128, "cpu")
     assert isinstance(cpu_proc[0], native_ops.HostSlidingWindowNoRepeatNgram)
+
+
+def test_ngram_host_강제_레버(monkeypatch):
+    """OCR_NGRAM_HOST=1이면 GPU/MPS에서도 호스트 티어 — MPS scatter 이슈 절연용."""
+    from app.native_ops import (
+        HostSlidingWindowNoRepeatNgram,
+        TorchSlidingWindowNoRepeatNgram,
+        make_ngram_logits_processor,
+    )
+
+    monkeypatch.delenv("OCR_NGRAM_HOST", raising=False)
+    assert isinstance(make_ngram_logits_processor(30, 128, "mps")[0], TorchSlidingWindowNoRepeatNgram)
+    monkeypatch.setenv("OCR_NGRAM_HOST", "1")
+    assert isinstance(make_ngram_logits_processor(30, 128, "mps")[0], HostSlidingWindowNoRepeatNgram)
+    assert isinstance(make_ngram_logits_processor(30, 128, "cuda")[0], HostSlidingWindowNoRepeatNgram)
