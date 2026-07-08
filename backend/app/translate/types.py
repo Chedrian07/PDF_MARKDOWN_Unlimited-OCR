@@ -28,6 +28,17 @@ PROMPT_V = "4"
 
 SUPPORTED_LANGS = ("ko",)
 
+# TRANSLATE_REASONING effort별 요청당 max_tokens 예산 (사용자 확정, 2026-07-08).
+# thinking 모델은 reasoning 토큰이 같은 예산에서 차감되므로 effort에 비례해 키운다.
+REASONING_MAX_TOKENS = {
+    "": 8192,        # 파라미터 미전송 (reasoning 여부 모름 — off와 동일 예산)
+    "off": 8192,
+    "low": 10240,
+    "medium": 20480,
+    "high": 40960,
+    "xhigh": 81920,
+}
+
 
 class TranslateError(RuntimeError):
     """번역 실패 — message는 사용자에게 그대로 보여줄 수 있는 한국어 문장."""
@@ -55,9 +66,17 @@ class TranslateConfig:
     max_tokens_param: str = "max_tokens"  # max_tokens | max_completion_tokens | none
     context: bool = True  # 직전 유닛 꼬리를 참고 컨텍스트로 프롬프트에 포함
     # reasoning 모델 제어 (OpenRouter 통합 파라미터): "" = 파라미터 미전송(호환 기본),
-    # off = {"enabled": false}, low|medium|high = {"effort": ...}.
+    # off = {"enabled": false}, low|medium|high|xhigh = {"effort": ...}.
     # 실측(qwen3.7-plus): off가 유닛당 37s→1.7s, 출력 토큰 ~1/40 — 번역엔 reasoning 불필요.
     reasoning: str = ""
+
+    @property
+    def max_output_tokens(self) -> int:
+        """요청당 max_tokens 예산 — reasoning effort별 고정 테이블 (사용자 확정값).
+
+        thinking 토큰이 출력 예산에서 차감되므로 effort가 높을수록 예산을 키운다.
+        미사용 토큰은 과금되지 않으므로 상한은 폭주 방지용이다."""
+        return REASONING_MAX_TOKENS.get(self.reasoning, REASONING_MAX_TOKENS[""])
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "TranslateConfig":
@@ -78,8 +97,8 @@ class TranslateConfig:
                 "TRANSLATE_MAX_TOKENS_PARAM은 max_tokens|max_completion_tokens|none 중 하나여야 합니다"
             )
         reasoning = (_clean(e.get("TRANSLATE_REASONING")) or "").lower()
-        if reasoning not in ("", "off", "low", "medium", "high"):
-            raise TranslateError("TRANSLATE_REASONING은 off|low|medium|high 또는 빈 값이어야 합니다")
+        if reasoning not in REASONING_MAX_TOKENS:
+            raise TranslateError("TRANSLATE_REASONING은 off|low|medium|high|xhigh 또는 빈 값이어야 합니다")
         return cls(
             base_url=base_url,
             api_key=_clean(e.get("OPENAI_API_KEY")),

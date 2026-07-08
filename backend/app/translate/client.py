@@ -86,7 +86,7 @@ class OpenAICompatClient:
         reasoning = None
         if cfg.reasoning == "off":
             reasoning = {"enabled": False}
-        elif cfg.reasoning in ("low", "medium", "high"):
+        elif cfg.reasoning in ("low", "medium", "high", "xhigh"):
             reasoning = {"effort": cfg.reasoning}
         if mode == "responses":
             p: dict = {"model": cfg.model, "instructions": system, "input": user}

@@ -146,3 +146,24 @@ def test_max_completion_tokens_파라미터():
     c._post = post
     c.complete("s", "u", max_tokens=512)
     assert captured["max_completion_tokens"] == 512 and "max_tokens" not in captured
+
+
+def test_reasoning_effort별_max_tokens_예산():
+    """effort별 요청 max_tokens 테이블 (사용자 확정값) + xhigh 모드 지원."""
+    from app.translate.types import REASONING_MAX_TOKENS, TranslateConfig
+
+    expect = {"": 8192, "off": 8192, "low": 10240, "medium": 20480, "high": 40960, "xhigh": 81920}
+    assert REASONING_MAX_TOKENS == expect
+    for mode, budget in expect.items():
+        cfg = TranslateConfig(base_url="https://h/v1", api_key="", model="m", reasoning=mode)
+        assert cfg.max_output_tokens == budget
+
+    # from_env가 xhigh를 허용하고 payload에 effort로 실림
+    cfg = TranslateConfig.from_env({
+        "OPENAI_BASE_URL": "https://h/v1", "OPENAI_MODEL": "m",
+        "TRANSLATE_REASONING": "xhigh", "TRANSLATE_API_MODE": "chat",
+    })
+    assert cfg.reasoning == "xhigh" and cfg.max_output_tokens == 81920
+    from app.translate.client import OpenAICompatClient
+    p = OpenAICompatClient(cfg)._build_payload("chat", "s", "u", cfg.max_output_tokens)
+    assert p["reasoning"] == {"effort": "xhigh"} and p["max_tokens"] == 81920

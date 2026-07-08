@@ -206,7 +206,10 @@ def run_translation(
         sanitized_n = 0  # sanitize 치환 총건수 (모든 complete 출력 경로 합산)
 
         def _max_toks(masked: str) -> int:
-            return min(8000, max(384, len(masked) // 2 + 300))
+            # reasoning effort별 고정 예산 (types.REASONING_MAX_TOKENS, 사용자 확정) —
+            # thinking 토큰이 같은 예산에서 차감되므로 길이 공식 대신 모드 상한을 그대로 쓴다.
+            # 미사용 토큰은 과금되지 않고, 상한은 폭주 방지용이다.
+            return cfg.max_output_tokens
 
         def _run_pass(prompt: str, max_toks: int, mapping: dict) -> tuple[str, list, list, int, str]:
             """complete → sanitize → unmask 한 번. (복원문, missing, dup, 치환건수, 정리된_원출력)."""

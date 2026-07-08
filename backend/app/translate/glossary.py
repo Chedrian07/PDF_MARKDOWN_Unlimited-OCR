@@ -235,7 +235,10 @@ def build_glossary(md_text: str, ordered_units, client, cfg) -> Glossary:
         try:
             headings = _HEADING_RE.findall(md_text)
             prompt = prompts.build_glossary_prompt(md_text[:2000], headings, cands)
-            raw = client.complete(prompts.SYSTEM_GLOSSARY, prompt, max_tokens=4000)
+            # 예산은 reasoning effort 연동 (thinking이 길면 4000 고정으로는 JSON이 잘려
+            # 시드로 조용히 강등되던 지점). cfg가 없으면(테스트 등) 종전 4000 유지.
+            mt = cfg.max_output_tokens if cfg is not None else 4000
+            raw = client.complete(prompts.SYSTEM_GLOSSARY, prompt, max_tokens=mt)
             for it in _parse_glossary_json(raw):
                 if not isinstance(it, dict):
                     continue
