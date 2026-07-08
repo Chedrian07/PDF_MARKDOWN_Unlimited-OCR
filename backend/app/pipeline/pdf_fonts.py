@@ -57,12 +57,17 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
     pages 엔트리: {"page": N(1-based), "width", "height", "blocks": [...]}.
     블록을 제자리(in-place)로 수정하고, 하나라도 주입했으면 True를 돌려준다."""
     try:
-        import fitz
+        # 조용한 임포트 — 손상 폰트 PDF에서 get_text가 MuPDF 에러를 stderr에
+        # 페이지마다 쏟아내던 것을 차단(요약은 아래 finally의 drain이 로깅)
+        from .pdf import drain_mupdf_warnings, quiet_fitz
+
+        fitz = quiet_fitz()
     except Exception:
         return False
     try:
         doc = fitz.open(str(pdf_path))
     except Exception:
+        drain_mupdf_warnings("폰트 추출")
         return False
 
     changed = False
@@ -150,4 +155,5 @@ def enrich_layout_fonts(pdf_path: Path, pages: list[dict]) -> bool:
             changed = True
     finally:
         doc.close()
+        drain_mupdf_warnings("폰트 추출")
     return changed

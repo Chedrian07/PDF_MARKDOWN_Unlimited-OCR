@@ -1,9 +1,29 @@
+import logging
+
 import pytest
 
-from app.pipeline.pdf import probe_pdf, render_pdf_pages
+from app.pipeline.pdf import drain_mupdf_warnings, probe_pdf, render_pdf_pages
 from app.pipeline.render import render_document_html, render_markdown_html
 
 from conftest import make_pdf_bytes
+
+# 알 수 없는 CIDFont 서브타입(/CIDFontType5)을 가진 최소 PDF — MuPDF가 텍스트를
+# 그릴 때 복구성 "syntax error: unknown cid font type"을 내지만 렌더는 계속된다.
+# 실사용자 문서(손상 CJK 폰트)가 페이지당 이 에러를 수십 줄씩 stderr에 쏟던 리프로.
+BROKEN_CID_PDF = b"""%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length 40 >> stream
+BT /F1 12 Tf 50 100 Td <0001> Tj ET
+endstream
+endobj
+5 0 obj << /Type /Font /Subtype /Type0 /BaseFont /Broken /Encoding /Identity-H /DescendantFonts [6 0 R] >> endobj
+6 0 obj << /Type /Font /Subtype /CIDFontType5 /BaseFont /Broken /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 7 0 R >> endobj
+7 0 obj << /Type /FontDescriptor /FontName /Broken /Flags 4 /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >> endobj
+trailer << /Root 1 0 R /Size 8 >>
+%%EOF
+"""
 
 
 def _write_pdf(tmp_path, **kw):
@@ -31,6 +51,65 @@ def test_probe_pdf_limits(tmp_path):
     bad.write_bytes(b"%PDF-not really a pdf")
     with pytest.raises(ValueError):
         probe_pdf(bad, max_pages=10)
+
+
+def _write_broken_cid_pdf(tmp_path):
+    """손상 CID 폰트 PDF 픽스처 — pymupdf로 1회 재저장해 xref를 정규화한다
+    (리페어 잡음 제거, 손상 폰트 객체는 보존 → 남는 경고는 cid 에러뿐)."""
+    from app.pipeline.pdf import quiet_fitz
+
+    raw = tmp_path / "raw.pdf"
+    raw.write_bytes(BROKEN_CID_PDF)
+    fixed = tmp_path / "broken.pdf"
+    fitz = quiet_fitz()  # 정규화 중 리페어 메시지도 stderr 대신 버퍼로
+    doc = fitz.open(str(raw))
+    doc.save(str(fixed))
+    doc.close()
+    drain_mupdf_warnings("픽스처 정규화")  # 리페어 메시지를 버퍼에서 제거
+    return fixed
+
+
+def test_broken_font_pdf_renders_quietly(tmp_path, capfd, caplog):
+    """손상 CID 폰트 PDF: 렌더는 성공하고, MuPDF 에러는 stderr(fd 레벨) 대신
+    로거 요약 한 줄로 나간다 — 서버 콘솔 스팸 방지."""
+    pdf = _write_broken_cid_pdf(tmp_path)
+    capfd.readouterr()  # 픽스처 단계 출력 비우기 — 아래는 본 검증분만 캡처
+    with caplog.at_level(logging.INFO, logger="app.pipeline.pdf"):
+        assert probe_pdf(pdf, max_pages=10) == 1
+        out = render_pdf_pages(pdf, tmp_path / "pages", dpi=100, max_pages=10)
+    assert [p.name for p in out] == ["page_0001.png"]
+    assert out[0].stat().st_size > 0                      # 렌더 자체는 정상
+    captured = capfd.readouterr()
+    assert "MuPDF" not in captured.err                    # C 레벨 stderr 무출력
+    assert "unknown cid font type" not in captured.err
+    summaries = [r.message for r in caplog.records if "MuPDF 복구성 경고" in r.message]
+    assert summaries                                      # 요약은 로거로 보존
+    assert any("unknown cid font type" in m for m in summaries)
+
+
+def test_drain_mupdf_warnings_summary(monkeypatch, caplog):
+    """버퍼 요약 형식 — 종류별 건수, 상위 3종 + '외 N종', 총 건수."""
+    import fitz
+
+    monkeypatch.setattr(
+        fitz.TOOLS, "mupdf_warnings",
+        lambda reset=True: "cid err\ncid err\ncid err\nbogus ascent\nrepairing\nother",
+    )
+    with caplog.at_level(logging.INFO, logger="app.pipeline.pdf"):
+        drain_mupdf_warnings("테스트")
+    assert len(caplog.records) == 1
+    msg = caplog.records[0].message
+    assert "6건" in msg and "테스트" in msg
+    assert "cid err (x3)" in msg
+    assert "외 1종" in msg                                # 4종 중 상위 3종만 나열
+
+
+def test_drain_mupdf_warnings_empty_is_silent(caplog):
+    """버퍼가 비었으면 로그도 없다 (정상 PDF에서 소음 없음)."""
+    drain_mupdf_warnings("사전 비우기")  # 이전 테스트 잔여 버퍼 제거
+    with caplog.at_level(logging.INFO, logger="app.pipeline.pdf"):
+        drain_mupdf_warnings("빈 버퍼")
+    assert not caplog.records
 
 
 def test_markdown_html_rewrite_and_escape():
