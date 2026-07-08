@@ -45,9 +45,13 @@ def fast_greedy_decode(model, gen_kwargs: dict, block: int = 8):
         "images": gen_kwargs.get("images"),
         "images_seq_mask": gen_kwargs.get("images_seq_mask"),
         "images_spatial_crop": gen_kwargs.get("images_spatial_crop"),
-        "attention_mask": torch.ones_like(input_ids),
         "past_key_values": DynamicCache(),
         "use_cache": True,
+        # attention_mask 대신 명시적 position_ids — 벤더 prepare_inputs가 위치 복원용으로
+        # 마스크 전체에 토큰마다 cumsum을 돌던 것(O(길이) 커널 체인)을 제거한다.
+        # 배치=1 그리디에서 마스크는 전부 1이라 정보가 없고, 모델 forward는 q_len=1에서
+        # 마스크를 무시하며 프리필은 None이어도 동일한 causal 마스크를 만든다.
+        "position_ids": torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0),
     }
     if streamer is not None:
         streamer.put(input_ids.cpu())  # skip_prompt 스트리머의 프롬프트 소비 (HF와 동일)
@@ -65,8 +69,9 @@ def fast_greedy_decode(model, gen_kwargs: dict, block: int = 8):
         next_tok = logits.argmax(dim=-1, keepdim=True)  # 디바이스에 상주 — 동기화 없음
         input_ids = torch.cat([input_ids, next_tok], dim=-1)
         model_kwargs["past_key_values"] = out.past_key_values
-        am = model_kwargs["attention_mask"]
-        model_kwargs["attention_mask"] = torch.cat([am, am.new_ones(1, 1)], dim=-1)
+        # 다음 스텝 위치 — 매번 새 텐서를 만든다 (P19 rotary 캐시가 id(position_ids)로
+        # 스텝을 식별하므로 in-place 증가는 금지)
+        model_kwargs["position_ids"] = model_kwargs["position_ids"][:, -1:] + 1
         pending += 1
 
         if pending >= block or input_ids.shape[1] >= max_length:

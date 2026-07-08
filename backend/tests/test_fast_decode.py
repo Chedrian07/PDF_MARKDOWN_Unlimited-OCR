@@ -134,3 +134,47 @@ def test_block_one_equals_larger_block_output():
     a = _run(StubModel(eos_after=9), block=1)
     b = _run(StubModel(eos_after=9), block=7)
     assert a.tolist() == b.tolist()  # 블록 크기는 결과에 영향 없음 (동기화 빈도만)
+
+
+class RecordingModel(StubModel):
+    """prepare_inputs_for_generation에 전달된 kwargs를 스텝별로 기록하는 스텁.
+    attention_mask 전달 여부, position_ids 값 스냅샷, position_ids 텐서 객체를 남긴다."""
+
+    def __init__(self, eos_after=None):
+        super().__init__(eos_after=eos_after)
+        self.saw_attention_mask = False
+        self.position_id_values: list[list[int]] = []
+        self.position_id_tensors: list = []  # 참조 유지 → id() 재사용(GC) 방지
+
+    def prepare_inputs_for_generation(self, input_ids, **kw):
+        if "attention_mask" in kw:
+            self.saw_attention_mask = True
+        pos = kw.get("position_ids")
+        self.position_id_values.append(pos[0].tolist())  # 호출 시점 값 스냅샷
+        self.position_id_tensors.append(pos)             # 객체 자체 보관 (아래 id 검사용)
+        return super().prepare_inputs_for_generation(input_ids, **kw)
+
+
+def test_passes_position_ids_and_no_attention_mask():
+    """attention_mask를 넘기지 않고, position_ids가 프리필 [0..L-1] → 이후 [L],[L+1],…로 증가."""
+    model = RecordingModel(eos_after=6)
+    prompt = (0, 1, 2)  # L=3
+    _run(model, prompt=prompt, block=4)
+
+    assert model.saw_attention_mask is False  # (a) attention_mask 미전달
+    assert model.position_id_values[0] == [0, 1, 2]  # (b) 프리필: 전체 위치
+    # 이후 디코드 스텝: [3], [4], [5], … 단조 증가
+    for step, value in enumerate(model.position_id_values[1:], start=len(prompt)):
+        assert value == [step]
+
+
+def test_position_ids_is_a_fresh_tensor_each_step():
+    """(c) 매 스텝 position_ids는 직전과 다른 새 텐서 객체 — P19 rotary 캐시가
+    id(position_ids)로 스텝을 식별하므로 in-place 증가(동일 id 재사용)는 회귀다."""
+    model = RecordingModel(eos_after=6)
+    _run(model, prompt=(0, 1, 2), block=4)
+
+    tensors = model.position_id_tensors
+    assert len(tensors) >= 3  # 프리필 + 최소 몇 스텝은 돌아야 의미 있는 검사
+    ids = [id(t) for t in tensors]  # 전부 살아있어 id 재사용 불가
+    assert len(set(ids)) == len(ids)  # 모든 스텝이 서로 다른 객체

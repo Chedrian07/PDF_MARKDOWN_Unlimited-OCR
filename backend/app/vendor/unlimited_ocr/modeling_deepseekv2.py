@@ -559,6 +559,16 @@ class AddAuxiliaryLoss(torch.autograd.Function):
         return grad_output, grad_loss
 
 
+def _moe_fast_enabled(device_type):
+    # [vendor patch P18] 기본은 MPS 전용. OCR_MOE_FAST=1(전 디바이스 강제 on)/0(강제 off).
+    v = os.environ.get("OCR_MOE_FAST", "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return device_type == "mps"
+
+
 class DeepseekV2MoE(nn.Module):
     """
     A mixed expert module containing shared experts.
@@ -636,6 +646,24 @@ class DeepseekV2MoE(nn.Module):
 
     @torch.no_grad()
     def moe_infer(self, x, topk_ids, topk_weight):
+        # [vendor patch P18] 단일 토큰(seq==1) 디코드 패스트패스 — argsort/scatter/cnts
+        # 기계장치와 레이어당 호스트 동기화(tokens_per_expert.cpu())를 제거하고 topk
+        # 전문가만 직접 실행. 전문가 연산과 최종 가중합(view→type→mul_→sum→type)의
+        # 연산 순서가 원본과 동일해 결과 비트 동일. 기본 MPS 전용(디스패치 바운드
+        # 완화), OCR_MOE_FAST=1/0으로 전 디바이스 강제 on/off (P16 게이트 패턴).
+        # P17(CUDA 융합)과 상보 — P17은 가중치를 재스택하지만 여기는 기존 expert
+        # 뷰만 사용해 바이트 파리티를 유지한다.
+        if x.shape[0] == 1 and self.ep_size == 1 and _moe_fast_enabled(x.device.type):
+            ids = topk_ids[0].tolist()  # [K] — 유일한 소형 호스트 읽기
+            outs = torch.cat([self.experts[i](x) for i in ids], dim=0)
+            final_out = (
+                outs.view(*topk_ids.shape, -1)
+                .type(topk_weight.dtype)
+                .mul_(topk_weight.unsqueeze(dim=-1))
+                .sum(dim=1)
+                .type(outs.dtype)
+            )
+            return final_out
         cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
         cnts.scatter_(1, topk_ids, 1)
         tokens_per_expert = cnts.sum(dim=0)
@@ -1346,6 +1374,22 @@ class SlidingWindowLlamaAttention(LlamaAttention):
         # DynamicCache from truncating prefill tokens
         self._sliding_window = getattr(config, 'sliding_window', None)
 
+    def _rope_cached(self, past_kv, value_states, position_ids):
+        # [vendor patch P19] rotary cos/sin은 한 스텝의 모든 레이어에서 동일(위치·dtype에만
+        # 의존) — layer 0가 계산해 캐시 객체에 스태시, 레이어 1+는 동일 텐서를 재사용해
+        # 스텝당 rotary 계산을 12회→1회로 줄인다 (동일 텐서 재사용 → 비트 동일).
+        # layer 0는 키 일치 여부와 무관하게 항상 재계산·갱신하므로 스텝 간 id() 재사용
+        # 충돌에도 안전하다 (레이어 실행 순서는 항상 0→N).
+        key = (id(position_ids), value_states.dtype)
+        if (past_kv is not None and self.layer_idx != 0
+                and getattr(past_kv, "_rope_key", None) == key):
+            return past_kv._rope_val
+        cos, sin = self.rotary_emb(value_states, position_ids)
+        if past_kv is not None and self.layer_idx == 0:
+            past_kv._rope_key = key
+            past_kv._rope_val = (cos, sin)
+        return cos, sin
+
     def forward(self, *args, **kwargs):
         import math
 
@@ -1404,7 +1448,7 @@ class SlidingWindowLlamaAttention(LlamaAttention):
             key_states = self.k_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim).transpose(1, 2)
             value_states = self.v_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim).transpose(1, 2)
 
-            cos, sin = self.rotary_emb(value_states, position_ids)
+            cos, sin = self._rope_cached(past_kv, value_states, position_ids)
             query_states, key_states = _llama_apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
             if past_kv is not None and use_cache_update:
@@ -1479,7 +1523,7 @@ class SlidingWindowLlamaAttention(LlamaAttention):
         query_states = self.q_proj(hidden_states).view(bsz, q_len, num_heads, head_dim).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(bsz, q_len, num_kv_heads, head_dim).transpose(1, 2)
-        cos, sin = self.rotary_emb(value_states, position_ids)
+        cos, sin = self._rope_cached(past_kv, value_states, position_ids)
         query_states, key_states = _llama_apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         # Overwrite ring slots in-place
