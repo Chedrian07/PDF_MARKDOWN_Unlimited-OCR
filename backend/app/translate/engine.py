@@ -117,18 +117,24 @@ def run_translation(
 
     def write_state(status: str, current: int, total_: int, error: str | None = None) -> None:
         mode = getattr(client, "api_mode_used", "") or (cfg.api_mode if cfg.api_mode != "auto" else "")
-        _atomic_write_json(tdir / "state.json", {
-            "lang": lang,
-            "status": status,
-            "current": current,
-            "total": total_,
-            "error": error,
-            "model": cfg.model,
-            "api_mode": mode,
-            "prompt_v": PROMPT_V,
-            "started_at": started,
-            "finished_at": _now() if status in ("done", "error", "canceled") else None,
-        })
+        try:
+            _atomic_write_json(tdir / "state.json", {
+                "lang": lang,
+                "status": status,
+                "current": current,
+                "total": total_,
+                "error": error,
+                "model": cfg.model,
+                "api_mode": mode,
+                "prompt_v": PROMPT_V,
+                "started_at": started,
+                "finished_at": _now() if status in ("done", "error", "canceled") else None,
+            })
+        except FileNotFoundError:
+            pass  # 잡 삭제 경합(DELETE가 디렉터리 제거) — 상태 기록은 best-effort
+
+    def _cancel_set() -> bool:
+        return cancel is not None and cancel.is_set()
 
     try:
         # POST 직후 SSE 접속(404 방지)을 위해 유닛 집계 전이라도 즉시 running을 남긴다.
@@ -195,6 +201,12 @@ def run_translation(
             except Exception:
                 cache = {}
 
+        def flush_cache() -> None:
+            try:
+                _atomic_write_json(upath, cache)
+            except FileNotFoundError:
+                pass  # 잡 삭제 경합 — 캐시는 잡과 함께 사라진다
+
         warnings = list(glossary.warnings)
         results: dict[str, str] = {}
         kept_original: list[str] = []
@@ -222,7 +234,11 @@ def run_translation(
             """분할된 반쪽 하나를 독립 번역 — mask→complete→sanitize→unmask + repair 1회(추가 분할 없음).
 
             성공 시 복원문, 실패 시 None. sanitize 건수만 stats에 누적한다. 반쪽 단계의
-            API 오류는 무손실 원칙상 치명적이지 않으므로 None 처리(원 유닛 원문 유지로 귀결)."""
+            API 오류는 무손실 원칙상 치명적이지 않으므로 None 처리(원 유닛 원문 유지로 귀결).
+            취소는 API 호출 사이에서 확인한다 — 거대 표 래더가 취소 후에도 수 분간
+            호출을 이어가지 않게(응답성)."""
+            if _cancel_set():
+                return None
             masked, mapping = mask(src)
             max_toks = _max_toks(masked)
             prompt = prompts.build_unit_prompt(masked, pairs, first, context_tail=ctx, keep_terms=keep)
@@ -233,6 +249,8 @@ def run_translation(
             stats["sanitized"] += sc
             if not missing and not dup and restored.strip():
                 return restored
+            if _cancel_set():
+                return None
             try:
                 rprompt = prompts.build_repair_prompt(masked, clean, missing + dup)
                 r_restored, r_missing, r_dup, r_sc, _ = _run_pass(rprompt, max_toks, mapping)
@@ -244,12 +262,16 @@ def run_translation(
             return None
 
         def translate_unit(u):
+            stats = {"retried": 0, "repaired": 0, "split": 0, "sanitized": 0}
+            # 취소 응답성: 이미 디스패치된 유닛도 API 호출·래더 단계 사이에서 취소를
+            # 확인하고 "canceled" 센티널로 조기 반환한다 (결과 미반영, kept 오염 없음).
+            if _cancel_set():
+                return u, u.src, "canceled", "", stats
             masked, mapping = mask(u.src)
             pairs, first = glossary.for_unit(u.src, u.id)
             keep = glossary.keep_terms(u.src)
             # keep(A 원형)도 출력 정책을 바꾸므로 캐시 키에 포함 — (k, k) 쌍으로 해시
             key = cache_key(masked, cfg.model, pairs + first + [(k, k) for k in keep])
-            stats = {"retried": 0, "repaired": 0, "split": 0, "sanitized": 0}
             if not force and key in cache:
                 return u, cache[key], "cached", key, stats
             ctx = context_map.get(u.id) if cfg.context else None
@@ -265,6 +287,8 @@ def run_translation(
 
             # 여기부터 신뢰도 래더 — 태그 누락·중복 또는 빈 출력
             stats["retried"] = 1
+            if _cancel_set():
+                return u, u.src, "canceled", key, stats
 
             # 1) repair 패스 — 원문(태그 포함)+깨진 번역문을 주고 태그만 바로잡게 한다.
             try:
@@ -276,6 +300,8 @@ def run_translation(
                     return u, r_restored, "translated", key, stats
             except TranslateError:
                 pass
+            if _cancel_set():
+                return u, u.src, "canceled", key, stats
 
             # 2a) HTML 표 유닛 — </tr> 행 경계 분할 (깊이 2 = 최대 4분할).
             #     초대형 표는 반쪽도 실패할 수 있어 재귀 한 단계를 더 허용한다.
@@ -315,12 +341,15 @@ def run_translation(
                             stats["split"] = 1
                             return u, left + " " + right, "translated", key, stats
 
-            # 3) 최종 실패 → 원문 유지 (무손실 원칙 불변)
+            # 3) 최종 실패 → 원문 유지 (무손실 원칙 불변). 단, 래더 실패가 취소로 인한
+            #    조기 반환(None) 때문이면 kept_original 통계를 오염시키지 않는다.
+            if _cancel_set():
+                return u, u.src, "canceled", key, stats
             return u, u.src, "kept", key, stats
 
         # 취소: 디스패치 전 선체크
-        if cancel is not None and cancel.is_set():
-            _atomic_write_json(upath, cache)
+        if _cancel_set():
+            flush_cache()
             write_state("canceled", done, total)
             return TranslateResult(
                 status="canceled", total=total, translated=0, cached=0,
@@ -332,19 +361,25 @@ def run_translation(
         with cf.ThreadPoolExecutor(max_workers=max(1, cfg.concurrency)) as ex:
             futures = {}
             for u in targets:
-                if cancel is not None and cancel.is_set():
+                if _cancel_set():
                     canceled = True
                     break
                 futures[ex.submit(translate_unit, u)] = u
 
             if not canceled:
                 for fut in cf.as_completed(futures):
-                    if cancel is not None and cancel.is_set():
+                    if _cancel_set():
                         canceled = True
                         for f in futures:
                             f.cancel()
                         break
                     u, text, status, key, stats = fut.result()
+                    if status == "canceled":
+                        # 유닛이 래더 도중 취소를 감지하고 조기 반환 — 결과 미반영
+                        canceled = True
+                        for f in futures:
+                            f.cancel()
+                        break
                     results[u.id] = text
                     retried_n += stats["retried"]
                     repaired_n += stats["repaired"]
@@ -361,11 +396,11 @@ def run_translation(
                     if progress is not None:
                         progress(done, total)
                     if done % 10 == 0:
-                        _atomic_write_json(upath, cache)
+                        flush_cache()
                         # SSE 없이 state 폴링으로 보는 클라이언트(프런트 폴백)용 진행률
                         write_state("running", done, total)
 
-        _atomic_write_json(upath, cache)
+        flush_cache()
 
         if canceled:
             write_state("canceled", done, total)

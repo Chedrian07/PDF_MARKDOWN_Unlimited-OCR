@@ -282,6 +282,23 @@ def test_translate_cancel(client, sample_pdf, provider_env, monkeypatch):
     assert canceled_errors, evs
 
 
+# ── 5b. 잡 삭제가 실행 중 번역에 취소를 전파 ───────────────────────────────
+def test_delete_job_cancels_running_translation(client, sample_pdf, provider_env, monkeypatch):
+    """DELETE /jobs/{id}는 실행 중 번역 스레드의 cancel 이벤트를 set한다 —
+    삭제된 디렉터리에 유료 API 호출·기록을 계속하지 않게."""
+    monkeypatch.setattr("app.api.run_translation", _make_fake(wait_cancel=True))
+    jid = _done_job(client, sample_pdf)
+
+    assert client.post(f"/api/jobs/{jid}/translate", json={"lang": "ko"}).status_code == 202
+    _wait_until_status(client, jid, "running")
+    with client.app.state.translate_lock:
+        task = client.app.state.translate_tasks[(jid, "ko")]
+
+    assert client.delete(f"/api/jobs/{jid}").status_code == 204
+    assert task["cancel"].is_set()          # 삭제가 번역 취소를 전파했다
+    _wait_no_task(client, jid)              # 스레드가 곧 종료 (레지스트리 정리)
+
+
 # ── 6. stale 조정: running인데 태스크 없음 → error 재기록 ──────────────────
 def test_translate_state_stale_adjusted(client, sample_pdf, settings):
     jid = _done_job(client, sample_pdf)

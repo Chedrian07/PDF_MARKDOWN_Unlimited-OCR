@@ -4,6 +4,13 @@
 "auto"는 첫 호출에 responses를 시도하고 404/405/501이면 chat으로 영구 래치한다.
 requests만 쓰며(런타임 기존 의존성), 실제 전송은 _post 한 메서드로 모아 테스트가
 그것만 몽키패치하도록 한다.
+
+잘림(truncation) 처리: chat `finish_reason=="length"` / responses
+`status=="incomplete"`를 감지하면 같은 요청을 **max_tokens 2배로 1회 재시도**한다
+(2026-07-08 합의 정책 ②). thinking 모델은 reasoning 토큰이 같은 예산에서 차감되어
+effort 테이블(types.REASONING_MAX_TOKENS)로도 드물게 잘릴 수 있다 — 잘린 출력을
+조용히 반환하면 unmask 실패→래더→원문 유지로 강등되고, 용어집 Pass-0 JSON은
+시드로 조용히 강등되던 취약 지점이다.
 """
 
 from __future__ import annotations
@@ -58,9 +65,26 @@ class OpenAICompatClient:
 
     # ── 공개 API ───────────────────────────────────────────────────
     def complete(self, system: str, user: str, *, max_tokens: int) -> str:
+        text, truncated = self._complete_once(system, user, max_tokens)
+        if not truncated:
+            return text  # 빈 응답은 _parse가 이미 raise
+        # 잘림(finish_reason=length / responses incomplete) — 예산 2배로 1회 재시도.
+        # max_tokens 파라미터를 아예 안 보내는 설정(none)이면 같은 요청의 반복이라 생략.
+        if self.cfg.max_tokens_param != "none":
+            retry_text, _ = self._complete_once(system, user, max_tokens * 2)
+            if retry_text:
+                return retry_text  # 여전히 잘렸어도 더 긴 출력 — 래더가 흡수
+        if text:
+            return text
+        raise TranslateAPIError(
+            "번역 API 출력이 max_tokens에서 전부 잘렸습니다 — TRANSLATE_REASONING 예산을 확인하세요"
+        )
+
+    def _complete_once(self, system: str, user: str, max_tokens: int) -> tuple[str, bool]:
+        """1회 완성 시도 — (텍스트, 잘림 여부) 반환. auto 모드 폴백/래치 담당."""
         mode, allow_fallback = self._mode_for_call()
         try:
-            text = self._send(mode, system, user, max_tokens, allow_fallback)
+            result = self._send(mode, system, user, max_tokens, allow_fallback)
         except _NeedsFallback:
             # responses 미지원 → chat으로 영구 래치, 같은 요청 재전송(재시도 미소모)
             self._latched = "chat"
@@ -69,7 +93,7 @@ class OpenAICompatClient:
         if self.cfg.api_mode == "auto" and self._latched is None:
             self._latched = mode
             self.api_mode_used = mode
-        return text
+        return result
 
     # ── 내부 ────────────────────────────────────────────────────────
     def _mode_for_call(self) -> tuple[str, bool]:
@@ -114,7 +138,9 @@ class OpenAICompatClient:
             p["reasoning"] = reasoning
         return p
 
-    def _send(self, mode: str, system: str, user: str, max_tokens: int, allow_fallback: bool) -> str:
+    def _send(
+        self, mode: str, system: str, user: str, max_tokens: int, allow_fallback: bool
+    ) -> tuple[str, bool]:
         path = "responses" if mode == "responses" else "chat/completions"
         payload = self._build_payload(mode, system, user, max_tokens)
         attempt = 0
@@ -153,24 +179,31 @@ class OpenAICompatClient:
                 pass
         return min(30.0, float(3 ** attempt))  # 1 → 3 → 9 → 27 → 30
 
-    def _parse(self, mode: str, body: dict | str) -> str:
+    def _parse(self, mode: str, body: dict | str) -> tuple[str, bool]:
+        """(텍스트, 잘림 여부) 반환. 잘림 = chat finish_reason=="length" /
+        responses status=="incomplete" (미제공 서버는 False — 종전과 동일 동작).
+        빈 응답은 오류지만, 잘려서 빈 경우(reasoning이 예산 소진)는 재시도 대상이므로
+        raise하지 않고 ("", True)로 넘긴다."""
         if not isinstance(body, dict):
             raise TranslateAPIError(f"번역 API 응답 파싱 실패: {_body_preview(body)}")
         try:
             if mode == "responses":
+                truncated = body.get("status") == "incomplete"
                 ot = body.get("output_text")
                 if isinstance(ot, str) and ot.strip():
                     text = ot
                 else:
                     text = _parse_responses_output(body.get("output", []))
             else:
-                text = body["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as e:
+                choice = body["choices"][0]
+                truncated = choice.get("finish_reason") == "length"
+                text = choice["message"]["content"]
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
             raise TranslateAPIError(f"번역 API 응답 파싱 실패: {_body_preview(body)}") from e
         text = _postprocess(text)
-        if not text:
+        if not text and not truncated:
             raise TranslateAPIError("번역 API가 빈 응답을 반환했습니다")
-        return text
+        return text, truncated
 
 
 def _parse_responses_output(output) -> str:

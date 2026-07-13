@@ -93,6 +93,11 @@ def execute_job(
         broker.publish_progress(job)
 
         def _render_cb(done: int, total: int) -> None:
+            # 렌더 단계에서도 페이지 단위로 취소/삭제에 반응한다 — 대형 문서(수백 p)
+            # 렌더가 끝날 때까지 취소가 무시되지 않게. 예외는 render_pdf_pages를
+            # 관통해 아래 JobCanceled 핸들러로 떨어진다.
+            if cancel.is_set():
+                raise JobCanceled()
             job.progress.update(current_page=done, total_pages=total)
             broker.publish_progress(job)
 

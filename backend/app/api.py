@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import threading
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -364,12 +365,14 @@ def _backfill_layout_fonts(job, pages: list) -> None:
         return
     try:
         if enrich_layout_fonts(src, pages):
-            import os
-
-            p = job.dir / "layout.json"
-            tmp = job.dir / ".layout.json.tmp"
-            tmp.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, p)
+            # 요청별 고유 tmp — 동시 백필 요청이 같은 tmp에 겹쳐 쓰는 레이스 차단.
+            # (병합 워커의 .layout.json.tmp와도 이름이 겹치지 않는다.)
+            tmp = job.dir / f".layout.{uuid.uuid4().hex}.tmp"
+            try:
+                tmp.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+                os.replace(tmp, job.dir / "layout.json")
+            finally:
+                tmp.unlink(missing_ok=True)
     except Exception:
         pass  # 백필 실패는 렌더를 막지 않는다 (폴백 휴리스틱으로 표시)
 
@@ -451,21 +454,26 @@ def job_archive(request: Request, job_id: str) -> FileResponse:
         raise HTTPException(409, "아직 변환이 완료되지 않았습니다")
     zip_path = job.dir / "archive.zip"
     if not zip_path.is_file():
-        tmp = job.dir / ".archive.zip.tmp"
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-            md = job.dir / "result.md"
-            if md.is_file():
-                zf.write(md, "result.md")
-            # 번역본(result.ko.md 등)도 포함 — 번역 완료 시 이 zip 캐시가 삭제돼
-            # 다음 요청에서 번역본까지 담아 재생성된다. (glob은 result.md 자신은 제외)
-            for extra in sorted(job.dir.glob("result.*.md")):
-                zf.write(extra, extra.name)
-            images = job.dir / "images"
-            if images.is_dir():
-                for f in sorted(images.iterdir()):
-                    if f.is_file():
-                        zf.write(f, f"images/{f.name}")
-        tmp.replace(zip_path)
+        # 요청별 고유 tmp — 동시 요청 둘이 같은 tmp에 겹쳐 써 손상 zip이 캐시되는
+        # 레이스 차단(sync 핸들러는 스레드풀 병렬). 둘 다 완주하면 마지막 replace가 승자.
+        tmp = job.dir / f".archive.{uuid.uuid4().hex}.tmp"
+        try:
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+                md = job.dir / "result.md"
+                if md.is_file():
+                    zf.write(md, "result.md")
+                # 번역본(result.ko.md 등)도 포함 — 번역 완료 시 이 zip 캐시가 삭제돼
+                # 다음 요청에서 번역본까지 담아 재생성된다. (glob은 result.md 자신은 제외)
+                for extra in sorted(job.dir.glob("result.*.md")):
+                    zf.write(extra, extra.name)
+                images = job.dir / "images"
+                if images.is_dir():
+                    for f in sorted(images.iterdir()):
+                        if f.is_file():
+                            zf.write(f, f"images/{f.name}")
+            tmp.replace(zip_path)
+        finally:
+            tmp.unlink(missing_ok=True)
     stem = Path(job.filename).stem or "result"
     return FileResponse(
         zip_path,
@@ -660,6 +668,12 @@ def delete_job(request: Request, job_id: str) -> Response:
     ev = st.cancel_events.get(job_id)
     if ev is not None:
         ev.set()
+    # 이 잡의 실행 중 번역 스레드도 함께 취소 — 삭제된 디렉터리에 유료 API 호출과
+    # 파일 기록을 계속하지 않게 한다 (레지스트리 정리는 _run_translate_thread finally 몫).
+    with st.translate_lock:
+        for (jid, _lang), task in st.translate_tasks.items():
+            if jid == job_id:
+                task["cancel"].set()
     if job.status != "running":
         # queued 잡은 워커가 dequeue 시 delete_requested를 보고 정리하지만,
         # 디렉터리와 목록은 지금 바로 제거해 UI에서 사라지게 한다.

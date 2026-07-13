@@ -46,6 +46,15 @@ def _clean(page_md: str) -> str:
     return page_md.strip()
 
 
+def _atomic_write_json(path: Path, obj, indent: int | None = None) -> None:
+    """tmp에 쓰고 원자적으로 교체 — 크래시 타이밍에도 파손 파일이 남지 않는다.
+    단일 워커 스레드 전용이라 고정 tmp 이름으로 충분하다 (API 스레드의 폰트
+    백필은 요청별 고유 tmp를 쓰므로 이름이 겹치지 않는다)."""
+    tmp = path.parent / f".{path.name}.tmp"
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=indent), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 @dataclass
 class ChunkResult:
     chunk_dir: Path
@@ -117,9 +126,9 @@ class IncrementalMerger:
 
     def _write_boxes(self) -> None:
         if self.figure_boxes:
-            (self.images_dir / "boxes.json").write_text(
-                json.dumps(self.figure_boxes, ensure_ascii=False, indent=1), encoding="utf-8"
-            )
+            # 원자적 교체 — API 스레드(/html의 _load_figure_boxes)가 기록 중인 파일을
+            # 반쯤 읽는 일이 없게 (비원자 기록은 torn read → 풀폭 폴백을 유발했다)
+            _atomic_write_json(self.images_dir / "boxes.json", self.figure_boxes, indent=1)
 
     # ── 레이아웃 뷰 (Phase B — 부가 산출물, 결측 시 조용히 스킵) ─────────
 
@@ -164,9 +173,9 @@ class IncrementalMerger:
         except Exception:
             pass
         if self.layout_pages:
-            (self.job_dir / "layout.json").write_text(
-                json.dumps(self.layout_pages, ensure_ascii=False), encoding="utf-8"
-            )
+            # 원자적 교체 — 크래시/재시작 타이밍에 layout.json이 파손된 채 남아
+            # /layout이 500을 내는 일이 없게 (result.md의 _write_partial과 동일 패턴)
+            _atomic_write_json(self.job_dir / "layout.json", self.layout_pages)
 
     # ── 마크다운 재작성 ────────────────────────────────────────
 

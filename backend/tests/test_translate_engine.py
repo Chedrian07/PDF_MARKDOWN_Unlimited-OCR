@@ -247,6 +247,51 @@ def test_취소_사전set_canceled(job, cfg):
     assert _state(job)["status"] == "canceled"
 
 
+def test_취소_래더단계_사이_감지_repair_호출없음(tmp_path, cfg):
+    """최초 패스 직후 cancel이 set되면 repair/분할 호출 없이 canceled로 끝난다 —
+    거대 표 래더(유닛당 수 분)가 취소 후에도 이어지던 응답성 문제의 회귀 방지."""
+    ev = threading.Event()
+
+    class CancelAfterFirst(EchoClient):
+        """최초 패스에서 태그를 소실시키며 cancel을 set — 래더 진입 직전 취소."""
+
+        def complete(self, system, user, *, max_tokens):
+            self.calls += 1
+            src = _marker(user)
+            if src is None:
+                return ""
+            ev.set()
+            import re
+            return re.sub(r"<[mkgucft]\d+\b[^>]*>", "", src)
+
+    md = "The loss $L$ is minimized during training.\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+    client = CancelAfterFirst()
+    res = run_translation(tmp_path, "ko", cfg, client=client, cancel=ev)
+    assert res.status == "canceled"
+    assert client.calls == 1                     # repair(2번째 호출)에 진입하지 않음
+    assert res.kept_original == []               # 취소는 kept 통계를 오염시키지 않는다
+
+
+def test_잡삭제_경합시_예외없이_canceled(job, cfg):
+    """번역 도중 잡 디렉터리가 삭제(DELETE 경합)돼도 예외 없이 canceled로 끝난다 —
+    state/캐시 기록은 FileNotFoundError를 무시(best-effort)."""
+    import shutil
+
+    ev = threading.Event()
+
+    class DeletingClient(EchoClient):
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            if src is not None and not ev.is_set():
+                shutil.rmtree(job, ignore_errors=True)  # DELETE 경합 재현
+                ev.set()                                # api.delete_job의 cancel 전파 재현
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    res = run_translation(job, "ko", cfg, client=DeletingClient(), cancel=ev)
+    assert res.status == "canceled"
+
+
 def test_force_재번역(job, cfg):
     run_translation(job, "ko", cfg, client=EchoClient())
     forced = EchoClient()

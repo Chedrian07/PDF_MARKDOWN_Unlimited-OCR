@@ -42,6 +42,21 @@ def test_render_pages(tmp_path):
     assert seen == [(1, 2), (2, 2)]
 
 
+def test_render_progress_cb_예외가_즉시_중단(tmp_path):
+    """progress_cb에서 던진 예외는 렌더 루프를 관통한다 — 러너가 콜백에서
+    JobCanceled를 던져 렌더 단계 취소를 구현하는 계약의 기반."""
+    pdf = _write_pdf(tmp_path, pages=3)
+    calls = []
+
+    def cb(done, total):
+        calls.append(done)
+        raise RuntimeError("취소 시뮬레이션")
+
+    with pytest.raises(RuntimeError, match="취소 시뮬레이션"):
+        render_pdf_pages(pdf, tmp_path / "pages", dpi=100, max_pages=10, progress_cb=cb)
+    assert calls == [1]  # 첫 페이지 직후 중단 — 나머지는 렌더되지 않음
+
+
 def test_probe_pdf_limits(tmp_path):
     pdf = _write_pdf(tmp_path, pages=3)
     assert probe_pdf(pdf, max_pages=10) == 3

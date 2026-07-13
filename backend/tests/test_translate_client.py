@@ -148,6 +148,84 @@ def test_max_completion_tokens_파라미터():
     assert captured["max_completion_tokens"] == 512 and "max_tokens" not in captured
 
 
+def test_잘림_chat_finish_reason_length_예산2배_재시도():
+    """chat 출력이 length로 잘리면 max_tokens 2배로 1회 재시도한다."""
+    calls = []
+
+    def post(p, pl):
+        calls.append(pl.get("max_tokens"))
+        if len(calls) == 1:
+            return (200, {"choices": [{"message": {"content": "잘린 절반"},
+                                       "finish_reason": "length"}]}, {})
+        return (200, {"choices": [{"message": {"content": "완전한 번역"},
+                                   "finish_reason": "stop"}]}, {})
+
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = post
+    assert c.complete("s", "u", max_tokens=100) == "완전한 번역"
+    assert calls == [100, 200]
+
+
+def test_잘림_responses_incomplete_재시도():
+    calls = []
+
+    def post(p, pl):
+        calls.append(pl.get("max_output_tokens"))
+        if len(calls) == 1:
+            return (200, {"status": "incomplete", "output_text": "부분"}, {})
+        return (200, {"status": "completed", "output_text": "전체 번역"}, {})
+
+    c = OpenAICompatClient(_cfg(api_mode="responses"))
+    c._post = post
+    assert c.complete("s", "u", max_tokens=100) == "전체 번역"
+    assert calls == [100, 200]
+
+
+def test_잘림_재시도도_잘리면_재시도_출력_반환():
+    """2배 예산 후에도 잘리면 그 출력을 그대로 쓴다 — 이후는 래더가 흡수."""
+    seq = iter([
+        (200, {"choices": [{"message": {"content": "A"}, "finish_reason": "length"}]}, {}),
+        (200, {"choices": [{"message": {"content": "AB"}, "finish_reason": "length"}]}, {}),
+    ])
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: next(seq)
+    assert c.complete("s", "u", max_tokens=100) == "AB"
+
+
+def test_잘림_빈출력_reasoning_예산소진_재시도로_회복():
+    """thinking이 예산을 다 먹어 content가 비어도 '빈 응답' 오류 대신 재시도."""
+    seq = iter([
+        (200, {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}, {}),
+        (200, {"choices": [{"message": {"content": "본문"}, "finish_reason": "stop"}]}, {}),
+    ])
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: next(seq)
+    assert c.complete("s", "u", max_tokens=100) == "본문"
+
+
+def test_잘림_전부_빈출력이면_오류():
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: (200, {"choices": [{"message": {"content": ""},
+                                                "finish_reason": "length"}]}, {})
+    with pytest.raises(TranslateAPIError, match="잘렸습니다"):
+        c.complete("s", "u", max_tokens=100)
+
+
+def test_잘림_max_tokens_param_none이면_재시도_안함():
+    """max_tokens를 안 보내는 설정에선 재시도해도 같은 요청 — 1회로 끝낸다."""
+    calls = []
+
+    def post(p, pl):
+        calls.append(1)
+        return (200, {"choices": [{"message": {"content": "부분 출력"},
+                                   "finish_reason": "length"}]}, {})
+
+    c = OpenAICompatClient(_cfg(api_mode="chat", max_tokens_param="none"))
+    c._post = post
+    assert c.complete("s", "u", max_tokens=100) == "부분 출력"
+    assert len(calls) == 1
+
+
 def test_reasoning_effort별_max_tokens_예산():
     """effort별 요청 max_tokens 테이블 (사용자 확정값) + xhigh 모드 지원."""
     from app.translate.types import REASONING_MAX_TOKENS, TranslateConfig
