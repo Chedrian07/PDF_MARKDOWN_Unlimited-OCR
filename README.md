@@ -37,6 +37,21 @@ docker compose up -d --build ocr-cuda   # 서비스명 지정 → cuda 프로필
 OCR_ENGINE=fake docker compose up -d --build
 ```
 
+## 보안
+
+이 서비스는 **인증이 없습니다** — 접근 가능한 사람은 누구나 문서 열람·삭제·변환·(설정 시)
+유료 번역 트리거가 가능합니다. 그래서 compose는 기본적으로 **루프백(127.0.0.1)에만**
+포트를 바인딩하고, `ALLOWED_HOSTS`(기본 `localhost,127.0.0.1`) 밖의 Host 헤더는
+400으로 거부합니다(DNS rebinding 방어).
+
+LAN이나 공개 네트워크에 노출하려면 **반드시 인증을 제공하는 리버스 프록시**
+(예: nginx + basic auth, Tailscale/VPN) 뒤에 두세요. 그 후:
+
+1. `docker-compose.yml`의 ports를 `"8000:8000"`으로 변경 (또는 프록시만 컨테이너에 접근)
+2. 접속에 쓸 호스트명/IP를 `.env`의 `ALLOWED_HOSTS`에 추가 — 예:
+   `ALLOWED_HOSTS=localhost,127.0.0.1,ocr.example.com` (포트는 비교 시 무시됨).
+   compose가 컨테이너로 전달합니다.
+
 ## 한국어 번역
 
 변환이 끝난 문서(`result.md` + 레이아웃)를 OpenAI 호환 API로 한국어 번역해

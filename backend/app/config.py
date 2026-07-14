@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 _DEFAULT_REVISION = "ee63731b6461c8afcdcc7b15352e7d2ffecc2ead"
+_DEFAULT_ALLOWED_HOSTS = "localhost,127.0.0.1"
 
 
 def load_dotenv_file(path: Path | None = None) -> None:
@@ -48,6 +49,10 @@ def _env_int(name: str, default: int) -> int:
     return int(v) if v else default
 
 
+def _split_hosts(v: str) -> list[str]:
+    return [h.strip() for h in v.split(",") if h.strip()]
+
+
 @dataclass
 class Settings:
     device: str = "cpu"                 # cpu | cuda | metal (mps는 metal의 별칭)
@@ -68,6 +73,9 @@ class Settings:
     fast_decode: bool = True            # 커스텀 그리디 디코드 루프 (0이면 HF generate 폴백)
     decode_block: int = 8               # fast_decode의 호스트 동기화 배칭 크기(토큰)
     fake_delay: float = 0.02            # FakeEngine 페이지당 지연(초)
+    job_ttl_days: int = 0               # 터미널 잡(done/error/canceled) 자동 GC 보존 일수 — 0=비활성(opt-in)
+    # Host 헤더 화이트리스트 (DNS rebinding 방어) — 포트는 비교 시 무시됨 (localhost:8000 → localhost)
+    allowed_hosts: list[str] = field(default_factory=lambda: _split_hosts(_DEFAULT_ALLOWED_HOSTS))
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -94,6 +102,8 @@ class Settings:
             fast_decode=_env_bool("OCR_FAST_DECODE", True),
             decode_block=_env_int("OCR_DECODE_BLOCK", 8),
             fake_delay=float(os.environ.get("FAKE_DELAY", "0.02")),
+            job_ttl_days=_env_int("JOB_TTL_DAYS", 0),
+            allowed_hosts=_split_hosts(os.environ.get("ALLOWED_HOSTS") or _DEFAULT_ALLOWED_HOSTS),
         )
 
     @property

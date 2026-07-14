@@ -6,8 +6,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app import config as _config  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.main import create_app  # noqa: E402
+
+# TestClient는 Host: testserver로 요청한다 — 프로덕션 기본값(ALLOWED_HOSTS)은 그대로 두고
+# 테스트 프로세스의 기본 화이트리스트에만 추가한다 (Settings를 직접 생성하는 테스트 포함).
+_config._DEFAULT_ALLOWED_HOSTS += ",testserver"
 
 
 def make_pdf_bytes(pages: int = 3, with_image: bool = True) -> bytes:

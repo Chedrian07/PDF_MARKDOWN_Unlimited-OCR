@@ -17,7 +17,10 @@ services:
         TORCH_VARIANT: cpu
     image: unlimited-ocr-web:cpu
     ports:
-      - "8000:8000"
+      # 루프백 전용 바인딩 — 이 서비스는 인증이 없다 (README §보안).
+      # LAN 공개는 opt-in: "8000:8000"으로 바꾸고 리버스 프록시 뒤 인증 +
+      # environment에 ALLOWED_HOSTS로 서버 IP/호스트명 추가.
+      - "127.0.0.1:8000:8000"
     environment:
       OCR_DEVICE: cpu
       OCR_DTYPE: ${OCR_DTYPE:-auto}
@@ -28,6 +31,8 @@ services:
       RENDER_DPI: ${RENDER_DPI:-200}
       MAX_PAGES: ${MAX_PAGES:-200}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}   # 빈 값이면 서버 기본(localhost,127.0.0.1)
+      JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}    # 0 = 잡 자동 삭제 비활성 (opt-in)
       HF_TOKEN: ${HF_TOKEN:-}
       OCR_CPU_THREADS: ${OCR_CPU_THREADS:-0}
       OCR_FAST_DECODE: ${OCR_FAST_DECODE:-1}
@@ -65,7 +70,8 @@ services:
     profiles: ["cuda"]
     gpus: all
     ports:
-      - "8001:8000"
+      # 루프백 전용 — LAN 공개 방법은 ocr-cpu의 ports 주석 참조
+      - "127.0.0.1:8001:8000"
     environment:
       OCR_DEVICE: cuda
       OCR_DTYPE: ${OCR_DTYPE:-auto}
@@ -76,6 +82,8 @@ services:
       RENDER_DPI: ${RENDER_DPI:-200}
       MAX_PAGES: ${MAX_PAGES:-200}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}   # 빈 값이면 서버 기본(localhost,127.0.0.1)
+      JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}    # 0 = 잡 자동 삭제 비활성 (opt-in)
       HF_TOKEN: ${HF_TOKEN:-}
       # GPU_DEVICE=1 로 두 번째 GPU 선택 가능 (기본 0)
       CUDA_VISIBLE_DEVICES: ${GPU_DEVICE:-0}

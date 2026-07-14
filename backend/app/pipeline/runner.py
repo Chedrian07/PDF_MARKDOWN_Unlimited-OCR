@@ -261,3 +261,9 @@ def execute_job(
         if job.delete_requested:
             shutil.rmtree(job.dir, ignore_errors=True)
             store.remove(job.id)
+        else:
+            # 터미널 상태(done/error/canceled) 마감 시 work/ 정리 — 필요 산출물
+            # (images/·layout/·result.md·layout.json)은 add_chunk 시점에 이미 잡
+            # 루트로 이동/기록됐고, work/에는 boxes.json·raw_pages.json·실패 청크
+            # 잔여물만 남아 잡마다 무한 축적된다.
+            shutil.rmtree(job.dir / "work", ignore_errors=True)

@@ -9,6 +9,20 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+# ── 리소스 상한 (렌더 OOM 방어) ────────────────────────────────────────────
+# 페이지 한 변(pt) 상한. A0 = 2384×3370pt이므로 5400pt(≈1.9m)면 포스터·도면류
+# 정상 문서까지 넉넉히 통과한다. PDF 스펙은 MediaBox를 14400pt(200인치)까지
+# 허용하는데, 그런 페이지 1장(파일 수 KB)이 기본 200dpi에서 40000×40000px
+# ≈ RGB 4.8GB를 할당해 워커를 OOM으로 죽인다 — 업로드 검증(probe)에서 거부.
+MAX_PAGE_SIDE_PT = 5400
+
+# 페이지당 렌더 픽셀 수 상한. 50M px ≈ RGB 150MB(pixmap 버퍼)로 워커 메모리
+# 안에서 안전하다. A4@400dpi(≈15.5M px)는 그대로 통과하지만, probe를 통과한
+# 대형 페이지도 고 dpi에선 초과할 수 있으므로(예: 5400pt² @400dpi ≈ 900M px)
+# 거부가 아니라 비율 유지 축소로 처리한다. 그라운딩 좌표는 0–999 정규화라
+# 균일 축소에 영향 없다 (layout.py/_pct, pdf_fonts.py 참조).
+MAX_RENDER_PIXELS = 50_000_000
+
 
 def quiet_fitz():
     """fitz(pymupdf) 지연 임포트 + MuPDF 에러의 stderr 직접 출력 차단(프로세스 1회).
@@ -64,14 +78,35 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
             raise ValueError("페이지가 없는 PDF입니다")
         if n > max_pages:
             raise ValueError(f"페이지 수({n})가 상한({max_pages})을 초과합니다")
+        for i in range(n):
+            try:
+                r = doc[i].rect
+            except Exception:  # 페이지 로드 실패는 렌더 단계가 흰색 페이지로 격리
+                continue
+            if max(r.width, r.height) > MAX_PAGE_SIDE_PT:
+                raise ValueError(
+                    f"페이지 {i + 1}의 크기({r.width:.0f}×{r.height:.0f}pt)가 "
+                    f"한 변 상한({MAX_PAGE_SIDE_PT}pt)을 초과합니다"
+                )
         return n
     finally:
         doc.close()
         drain_mupdf_warnings("업로드 검증")
 
 
+def _capped_scale(w_pt: float, h_pt: float, dpi: int) -> tuple[float, int]:
+    """dpi 배율의 목표 픽셀 수를 구하고, MAX_RENDER_PIXELS 초과면 비율을
+    유지한 채 줄인 배율을 돌려준다. 반환: (배율, 축소 전 목표 픽셀 수)."""
+    scale = dpi / 72
+    target = int(w_pt * scale) * int(h_pt * scale)
+    if target > MAX_RENDER_PIXELS:
+        scale *= (MAX_RENDER_PIXELS / target) ** 0.5
+    return scale, target
+
+
 def _write_blank_page(doc, index: int, path: Path, dpi: int) -> None:
-    """렌더 실패 페이지의 대체 흰색 PNG — 페이지 크기를 못 읽으면 A4(pt) 기준."""
+    """렌더 실패 페이지의 대체 흰색 PNG — 페이지 크기를 못 읽으면 A4(pt) 기준.
+    정상 렌더와 같은 픽셀 상한을 지켜 대체 경로도 OOM을 못 일으키게 한다."""
     from PIL import Image
 
     try:
@@ -79,7 +114,7 @@ def _write_blank_page(doc, index: int, path: Path, dpi: int) -> None:
         w_pt, h_pt = float(rect.width), float(rect.height)
     except Exception:  # 페이지 객체 자체가 깨진 경우
         w_pt, h_pt = 595.0, 842.0
-    scale = dpi / 72
+    scale, _ = _capped_scale(w_pt, h_pt, dpi)
     size = (max(1, round(w_pt * scale)), max(1, round(h_pt * scale)))
     Image.new("RGB", size, "white").save(path)
 
@@ -94,7 +129,8 @@ def render_pdf_pages(
     """모든 페이지를 pages_dir/page_%04d.png (1-based)로 렌더.
 
     한 페이지가 깨져도(get_pixmap 예외) 잡 전체를 죽이지 않는다 — 흰색 페이지로
-    대체하고 계속한다. 전 페이지 실패 시에만 ValueError."""
+    대체하고 계속한다. 전 페이지 실패 시에만 ValueError.
+    페이지당 픽셀 수가 MAX_RENDER_PIXELS를 넘으면 비율을 유지한 채 축소한다."""
     fitz = quiet_fitz()
 
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -107,14 +143,23 @@ def render_pdf_pages(
             raise ValueError("페이지가 없는 PDF입니다")
         if n > max_pages:
             raise ValueError(f"페이지 수({n})가 상한({max_pages})을 초과합니다")
-        mat = fitz.Matrix(dpi / 72, dpi / 72)
         out: list[Path] = []
         failed = 0
         last_err: Exception | None = None
         for i in range(n):
             p = pages_dir / f"page_{i + 1:04d}.png"
             try:
-                pix = doc[i].get_pixmap(matrix=mat)
+                page = doc[i]
+                rect = page.rect
+                # pix 생성 전에 목표 픽셀 수를 계산 — 상한 초과 시 비율 유지 축소
+                # (probe의 치수 검사를 통과한 페이지도 고 dpi에선 넘을 수 있다)
+                scale, target = _capped_scale(rect.width, rect.height, dpi)
+                if target > MAX_RENDER_PIXELS:
+                    logger.warning(
+                        "페이지 %d/%d: 렌더 %dpx가 페이지당 상한(%dpx)을 초과 — "
+                        "비율 유지 축소 (배율 %.3f→%.3f)",
+                        i + 1, n, target, MAX_RENDER_PIXELS, dpi / 72, scale)
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
                 pix.save(str(p))
             except Exception as e:  # noqa: BLE001 — 페이지 단위 격리
                 failed += 1

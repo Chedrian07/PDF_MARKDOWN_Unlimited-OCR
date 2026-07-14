@@ -20,6 +20,15 @@ def test_health(client):
     assert "native_ops" in body
 
 
+def test_untrusted_host_header_rejected(client):
+    """TrustedHostMiddleware — 화이트리스트 밖 Host는 400 (DNS rebinding 방어)."""
+    r = client.get("/api/health", headers={"host": "evil.example.com"})
+    assert r.status_code == 400
+    # 기본 클라이언트(Host: testserver)와 포트 붙은 허용 호스트는 통과
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/health", headers={"host": "localhost:8000"}).status_code == 200
+
+
 def test_upload_validation(client, sample_pdf):
     r = client.post("/api/jobs", files={"file": ("a.txt", b"hello", "text/plain")})
     assert r.status_code == 400
@@ -178,6 +187,16 @@ def test_render_preview(client, sample_pdf):
     assert "<table><tr><td>a</td></tr></table>" in r.text
     assert "<script>" not in r.text
     assert client.post("/api/jobs/j_nope/render-preview", content=b"x").status_code == 404
+
+
+def test_render_preview_body_limit(client, sample_pdf):
+    """상한(2MB)은 스트리밍 수신 중 검사되어 초과 즉시 413. 경계값(정확히 2MB)은 통과."""
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    r = client.post(f"/api/jobs/{jid}/render-preview", content=b"x" * 2_000_001)
+    assert r.status_code == 413
+    at_limit = (b"x" * 99 + b"\n") * 20_000  # 정확히 2,000,000바이트
+    r = client.post(f"/api/jobs/{jid}/render-preview", content=at_limit)
+    assert r.status_code == 200
 
 
 def test_archive_before_done_conflicts(client, sample_pdf, settings):

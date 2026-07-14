@@ -8,6 +8,7 @@ import os
 import queue
 import shutil
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable
+
     from .config import Settings
     from .engine.base import OCREngine
 
@@ -144,6 +147,48 @@ class JobStore:
         shutil.rmtree(job.dir, ignore_errors=True)
         self.remove(job.id)
 
+    def gc_expired(
+        self, ttl_days: int, is_protected: "Callable[[str], bool] | None" = None
+    ) -> int:
+        """TTL 지난 터미널 잡 자동 정리 (JOB_TTL_DAYS — 0 이하면 무동작).
+
+        마지막 활동 시각은 meta.json mtime(save()가 상태 변화마다 재기록)과
+        translations/*/state.json mtime의 최댓값 — OCR이 오래전에 끝났어도 최근
+        번역된 잡은 보존한다. queued/running 잡은 절대 삭제하지 않고, is_protected
+        (번역 스레드 활성 등)는 삭제 직전에 잡별로 호출한다 — 스냅샷 방식이면 GC
+        패스 도중 시작된 번역이 보호되지 않는다. 삭제는 DELETE 엔드포인트와 같은
+        delete_dir 경로. 삭제 수 반환."""
+        if ttl_days <= 0:
+            return 0
+        now = time.time()
+        cutoff = now - ttl_days * 86400
+        with self._lock:
+            jobs = list(self._jobs.values())
+        removed = 0
+        for job in jobs:
+            if job.status in ("queued", "running"):
+                continue
+            try:
+                mtime = (job.dir / _META_NAME).stat().st_mtime
+            except OSError:  # meta 유실 — 나이를 알 수 없으니 보수적으로 보존
+                continue
+            tdir = job.dir / "translations"
+            if tdir.is_dir():
+                for st in tdir.glob("*/state.json"):
+                    try:
+                        mtime = max(mtime, st.stat().st_mtime)
+                    except OSError:
+                        pass
+            if mtime >= cutoff:
+                continue
+            if is_protected is not None and is_protected(job.id):
+                continue
+            logger.info("잡 GC: %s 삭제 (status=%s, %.1f일 경과 > TTL %d일)",
+                        job.id, job.status, (now - mtime) / 86400, ttl_days)
+            self.delete_dir(job)
+            removed += 1
+        return removed
+
     def load_existing(self) -> None:
         """서버 재시작 시 디스크의 잡 복원. 실행 중이던 잡은 오류로 마킹."""
         if not self.jobs_dir.is_dir():
@@ -161,12 +206,16 @@ class JobStore:
                     progress=m.get("progress") or _default_progress(),
                     error=m.get("error"), warnings=m.get("warnings") or [],
                 )
-                if job.status in ("queued", "running"):
+                changed = job.status in ("queued", "running")
+                if changed:
                     job.status = "error"
                     job.error = "서버 재시작으로 중단되었습니다"
                 with self._lock:
                     self._jobs[job.id] = job
-                self.save(job)
+                # 상태가 바뀐 잡만 재기록 — 터미널 잡의 meta.json mtime은 TTL GC의
+                # "마지막 갱신" 시계라, 무조건 재저장하면 재시작마다 TTL이 리셋된다.
+                if changed:
+                    self.save(job)
             except Exception:
                 logger.exception("잡 메타 복원 실패: %s", d)
 

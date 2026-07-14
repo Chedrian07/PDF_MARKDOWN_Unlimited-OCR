@@ -37,6 +37,14 @@ router = APIRouter(prefix="/api")
 
 _ALLOWED_FILE_DIRS = ("pages", "images", "layout")
 _UPLOAD_CHUNK = 1024 * 1024
+_PREVIEW_MAX_BYTES = 2_000_000
+
+# SSE 구독 루프 전용 스레드 예산 — 각 연결이 blocking 폴(_sse_poll, 최대 1초)로
+# 스레드 하나를 상시 점유하므로, 공용 AnyIO 풀(기본 40 토큰 — sync 라우트·업로드
+# probe·프리뷰 렌더가 공유)과 분리해 SSE 다중 접속이 나머지 요청을 굶기지 않게
+# 한다. 64 = 로컬 단일 사용자 도구 기준 동시 스트림(잡+번역 탭) 상한으로 충분히
+# 크고, 초과 연결은 끊기지 않고 다음 폴 차례만 대기한다.
+_SSE_LIMITER = anyio.CapacityLimiter(64)
 
 
 def _state(request: Request):
@@ -211,23 +219,25 @@ async def create_job(
     dest = job.dir / "source.pdf"
     size = 0
     try:
-        with dest.open("wb") as out:
+        # 디스크 쓰기·probe는 async 핸들러 안의 동기 blocking — 워커 스레드로 오프로드
+        # (특히 손상 PDF는 MuPDF repair 스캔으로 수 초 걸려 이벤트 루프가 멎는다).
+        async with await anyio.open_file(dest, "wb") as out:
             while chunk := await file.read(_UPLOAD_CHUNK):
                 size += len(chunk)
                 if size > settings.max_upload_bytes:
                     raise HTTPException(413, f"업로드 상한({settings.max_upload_mb}MB)을 초과했습니다")
-                out.write(chunk)
+                await out.write(chunk)
         if size == 0:
             raise HTTPException(400, "빈 파일입니다")
         with dest.open("rb") as f:
             if f.read(5) != b"%PDF-":
                 raise HTTPException(400, "PDF 형식이 아닙니다")
         try:
-            probe_pdf(dest, settings.max_pages)
+            await anyio.to_thread.run_sync(probe_pdf, dest, settings.max_pages)
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
     except HTTPException:
-        st.store.delete_dir(job)
+        await anyio.to_thread.run_sync(st.store.delete_dir, job)
         raise
 
     st.worker.submit(job)
@@ -283,7 +293,9 @@ async def job_events(request: Request, job_id: str) -> StreamingResponse:
             while True:
                 if await request.is_disconnected():
                     return
-                item = await anyio.to_thread.run_sync(functools.partial(_sse_poll, q))
+                item = await anyio.to_thread.run_sync(
+                    functools.partial(_sse_poll, q), limiter=_SSE_LIMITER,
+                )
                 if item is None:
                     idle += 1
                     if idle >= 15:
@@ -633,7 +645,9 @@ async def translate_events(request: Request, job_id: str, lang: str = "ko") -> S
             while True:
                 if await request.is_disconnected():
                     return
-                item = await anyio.to_thread.run_sync(functools.partial(_sse_poll, q))
+                item = await anyio.to_thread.run_sync(
+                    functools.partial(_sse_poll, q), limiter=_SSE_LIMITER,
+                )
                 if item is None:
                     idle += 1
                     if idle >= 15:
@@ -660,15 +674,27 @@ async def render_preview(request: Request, job_id: str) -> HTMLResponse:
     """클라이언트가 보낸 (정리된) 마크다운을 안전 렌더 — 라이브 미리보기용.
     /html과 동일한 렌더러라 XSS 이스케이프·표 복원·이미지 URL 재작성이 적용된다."""
     job = _get_job(request, job_id)
-    body = await request.body()
-    if len(body) > 2_000_000:
-        raise HTTPException(413, "미리보기 본문이 너무 큽니다 (2MB 초과)")
-    text = body.decode("utf-8", "replace")
-    return HTMLResponse(
-        render_markdown_html(
+    # 스트리밍 수신하며 상한을 먼저 검사 — 전체를 메모리에 적재한 뒤 검사하면
+    # 상한 초과 본문도 일단 다 받게 되어 상한의 의미가 없다.
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > _PREVIEW_MAX_BYTES:
+            raise HTTPException(413, "미리보기 본문이 너무 큽니다 (2MB 초과)")
+        chunks.append(chunk)
+    text = b"".join(chunks).decode("utf-8", "replace")
+
+    # 렌더(2MB에 ~0.2초)는 async 핸들러의 이벤트 루프를 막지 않게 오프로드.
+    # 공유 _md(markdown-it) 인스턴스는 렌더 시 상태 변이가 없어(파스 상태는
+    # 호출별 StateCore) 스레드 안전 — sync 핸들러(/html 등)가 이미 스레드풀에서
+    # 동시 사용 중인 기존 불변식이다.
+    def _render() -> str:
+        return render_markdown_html(
             text, f"/api/jobs/{job_id}/files", figure_boxes=_load_figure_boxes(job)
         )
-    )
+
+    return HTMLResponse(await anyio.to_thread.run_sync(_render))
 
 
 @router.delete("/jobs/{job_id}", status_code=204)

@@ -108,6 +108,60 @@ def test_probe_pdf_limits(tmp_path):
         probe_pdf(bad, max_pages=10)
 
 
+def _write_pdf_sized(tmp_path, w_pt, h_pt, name="sized.pdf"):
+    """지정한 MediaBox(pt) 크기의 빈 1페이지 PDF."""
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page(width=w_pt, height=h_pt)
+    p = tmp_path / name
+    doc.save(str(p))
+    doc.close()
+    return p
+
+
+def test_probe_pdf_rejects_oversized_page(tmp_path):
+    """PDF 스펙 최대 MediaBox(14400pt) 1페이지는 수 KB 파일로도 기본 200dpi에서
+    40000×40000px ≈ RGB 4.8GB를 할당시킨다 — 업로드 검증에서 거부(→ API 400).
+    A0(2384×3370pt) 같은 정상 대형 문서는 통과."""
+    big = _write_pdf_sized(tmp_path, 14400, 14400, "big.pdf")
+    with pytest.raises(ValueError, match="한 변 상한"):
+        probe_pdf(big, max_pages=10)
+    a0 = _write_pdf_sized(tmp_path, 2384, 3370, "a0.pdf")
+    assert probe_pdf(a0, max_pages=10) == 1
+
+
+def test_render_pixel_cap_downscales_keeping_aspect(tmp_path, monkeypatch, caplog):
+    """페이지당 픽셀 상한 초과는 거부가 아니라 비율 유지 축소 + warning 1줄
+    — probe를 통과한 정상 문서도 dpi=400에선 걸릴 수 있기 때문."""
+    from PIL import Image
+
+    pdf = _write_pdf(tmp_path, pages=1)  # A4 595×842pt
+    monkeypatch.setattr("app.pipeline.pdf.MAX_RENDER_PIXELS", 100_000)
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.pdf"):
+        out = render_pdf_pages(pdf, tmp_path / "pages", dpi=200, max_pages=10)
+    with Image.open(out[0]) as im:
+        w, h = im.size
+    assert w * h <= 100_000 * 1.02          # 상한 이하 (픽스맵 올림 여유 2%)
+    assert abs(w / h - 595 / 842) < 0.02    # 가로세로 비 유지
+    assert len([r for r in caplog.records if "축소" in r.message]) == 1
+
+
+def test_normal_a4_unaffected_by_size_caps(tmp_path, caplog):
+    """정상 A4 문서는 probe 치수 검사·렌더 픽셀 상한 모두의 영향을 받지 않는다."""
+    from PIL import Image
+
+    pdf = _write_pdf(tmp_path, pages=1)
+    assert probe_pdf(pdf, max_pages=10) == 1
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.pdf"):
+        out = render_pdf_pages(pdf, tmp_path / "pages", dpi=200, max_pages=10)
+    with Image.open(out[0]) as im:
+        w, h = im.size
+    # 595×842pt @200dpi 원래 배율 그대로 (595·200/72 ≈ 1653, 842·200/72 ≈ 2339)
+    assert abs(w - 595 * 200 / 72) <= 2 and abs(h - 842 * 200 / 72) <= 2
+    assert not any("축소" in r.message for r in caplog.records)
+
+
 def _write_broken_cid_pdf(tmp_path):
     """손상 CID 폰트 PDF 픽스처 — pymupdf로 1회 재저장해 xref를 정규화한다
     (리페어 잡음 제거, 손상 폰트 객체는 보존 → 남는 경고는 cid 에러뿐)."""
