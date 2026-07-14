@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import os
 import queue
 import threading
@@ -29,6 +30,8 @@ from .pipeline.render import render_document_html, render_markdown_html
 # 번역 코어는 아직 스켈레톤(run_translation은 NotImplementedError)이지만 import는 가능.
 # 테스트는 app.api.run_translation을 몽키패치로 대체한다.
 from .translate import SUPPORTED_LANGS, TranslateConfig, TranslateError, run_translation
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -151,8 +154,11 @@ def _run_translate_thread(
             # ko 번역본을 포함해 다시 만들도록 archive.zip 캐시를 무효화한다.
             (job.dir / "archive.zip").unlink(missing_ok=True)
     except TranslateError as e:
+        # SSE는 구독자가 없으면 이벤트를 버린다 — 서버 로그에도 반드시 남긴다
+        logger.exception("번역 실패: %s (lang=%s)", job.id, lang)
         broker.publish(channel, "error", {"message": str(e), "canceled": False})
     except Exception as e:  # noqa: BLE001 — 스레드가 조용히 죽지 않도록 SSE로 중계
+        logger.exception("번역 실패: %s (lang=%s)", job.id, lang)
         broker.publish(channel, "error", {"message": str(e), "canceled": False})
     finally:
         with st.translate_lock:

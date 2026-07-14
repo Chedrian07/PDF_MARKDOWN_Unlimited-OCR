@@ -11,29 +11,51 @@
   동시에 흐르고, STOP 버튼으로 중단해도 부분 결과가 보존됨
   (공식 데모 GIF의 long-horizon 파싱 경험 재현)
 - **디바이스 백엔드**: CPU / CUDA / Metal(Apple Silicon, torch MPS) 지원
+- **한국어 번역 (선택)**: 변환 결과를 OpenAI 호환 API로 한국어 번역 — §한국어 번역 참조
 - **원커맨드 배포**: `docker compose up` 하나로 끝 (Metal은 로컬 실행 — 아래 참조)
 
 ## 빠른 시작 (Docker)
 
 ```bash
-# CPU (기본 프로필)
+# CPU (기본 서비스 — 클론 직후 .env 없이 이 한 줄로 기동)
 docker compose up -d --build
 # → http://localhost:8000
 
 # CUDA (NVIDIA GPU + nvidia container toolkit 필요)
-docker compose --profile cuda up -d --build ocr-cuda
+docker compose up -d --build ocr-cuda   # 서비스명 지정 → cuda 프로필 자동 활성화
 # → http://localhost:8001
 ```
 
 - 최초 실행 시 모델 가중치(~6.7GB)를 `hf-cache` 볼륨에 1회 다운로드합니다
   (진행 상황: `docker compose logs -f`). CPU/CUDA 서비스가 캐시를 공유합니다.
 - 모델 로딩 여부는 헤더 배지 또는 `GET /api/health`의 `model_loaded`로 확인.
+- 한국어 번역 기능을 쓰려면 `cp .env.example .env` 후 API 키를 설정 — 아래 §한국어 번역 참조.
 
 ### 모델 없이 UI/파이프라인만 체험
 
 ```bash
 OCR_ENGINE=fake docker compose up -d --build
 ```
+
+## 한국어 번역
+
+변환이 끝난 문서(`result.md` + 레이아웃)를 OpenAI 호환 API로 한국어 번역해
+번역본 미리보기/레이아웃/다운로드를 제공합니다 (수식·이미지·표는 마스킹으로 보존).
+
+```bash
+cp .env.example .env   # 키 설정 후 docker compose up -d 로 재기동
+```
+
+`.env`에 아래 값을 설정하면 활성화됩니다:
+
+- `OPENAI_BASE_URL` — 버전 경로 포함 (예: `https://api.openai.com/v1`, `http://localhost:11434/v1`)
+- `OPENAI_API_KEY` — 로컬 서버는 생략 가능
+- `OPENAI_MODEL` — 번역에 쓸 모델 ID
+
+미설정이어도 나머지 기능은 그대로 동작합니다 — 번역 요청 시에만 503과 함께
+"번역 프로바이더가 설정되지 않았습니다" 안내가 표시됩니다.
+동시성/재시도/reasoning 등 세부 옵션과 파이프라인 설계는
+[docs/ARCHITECTURE.md §13](docs/ARCHITECTURE.md#13-한국어-번역-translation) 참조.
 
 ## macOS에서 Metal(MPS)로 실행
 
@@ -73,6 +95,9 @@ uv run uvicorn app.main:app --reload   # http://localhost:8000
 cd native && uv venv --python 3.12 .venv \
   && uv pip install -p .venv/bin/python -e . pytest numpy \
   && .venv/bin/python -m pytest tests/ -v
+
+# 프론트엔드 테스트 (Node 22 필요 — 의존성 설치 불필요, 리포 루트에서 실행)
+npm test --prefix frontend
 ```
 
 환경변수 전체 목록: [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md) —
@@ -127,6 +152,10 @@ PDF 업로드 → pymupdf로 페이지 PNG 렌더(기본 200dpi)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 아키텍처, REST/SSE API 계약, 설계 결정
 - [backend/app/vendor/unlimited_ocr/PROVENANCE.md](backend/app/vendor/unlimited_ocr/PROVENANCE.md) — 벤더링/패치 내역
 
-## 라이선스 관련
+## 라이선스
 
-모델 가중치와 벤더링된 모델 코드는 Baidu의 MIT 라이선스를 따릅니다.
+프로젝트 코드는 [MIT](LICENSE)입니다. 벤더링된 코드는 각자의 라이선스를 따릅니다:
+
+- 모델 가중치·벤더링된 모델 코드 — Baidu MIT
+  ([backend/app/vendor/unlimited_ocr/LICENSE](backend/app/vendor/unlimited_ocr/LICENSE))
+- KaTeX — MIT ([frontend/vendor/katex/LICENSE](frontend/vendor/katex/LICENSE))

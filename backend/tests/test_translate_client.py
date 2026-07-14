@@ -226,6 +226,49 @@ def test_잘림_max_tokens_param_none이면_재시도_안함():
     assert len(calls) == 1
 
 
+def test_재시도_경로_warning_로그(caplog):
+    """429 백오프·잘림 2배 재시도가 서버 로그에 warning으로 남는다 — 무기록 재시도 금지.
+    본문·API 키는 로그에 남기지 않는다."""
+    import logging
+
+    seq = iter([
+        (429, "느림", {"Retry-After": "0"}),
+        (200, {"choices": [{"message": {"content": "부분"}, "finish_reason": "length"}]}, {}),
+        (200, {"choices": [{"message": {"content": "완전"}, "finish_reason": "stop"}]}, {}),
+    ])
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: next(seq)
+    with caplog.at_level(logging.WARNING, logger="app.translate.client"):
+        assert c.complete("s", "u", max_tokens=100) == "완전"
+    msgs = [r.message for r in caplog.records]
+    assert any("HTTP 429" in m and "Retry-After" in m for m in msgs)   # 백오프 warning
+    assert any("잘림" in m and "100→200" in m for m in msgs)           # 잘림 재시도 warning
+    joined = "\n".join(msgs)
+    assert "sk-x" not in joined and "부분" not in joined               # 키·본문 무기록
+
+
+def test_연결오류_재시도_warning_로그(caplog):
+    import logging
+
+    import requests as _requests
+
+    calls = []
+
+    def post(p, pl):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _requests.ConnectionError("boom")
+        return (200, {"choices": [{"message": {"content": "성공"}}]}, {})
+
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = post
+    c._backoff = lambda headers, attempt: 0.0                          # 테스트 대기 제거
+    with caplog.at_level(logging.WARNING, logger="app.translate.client"):
+        assert c.complete("s", "u", max_tokens=100) == "성공"
+    msgs = [r.message for r in caplog.records]
+    assert any("연결 오류(ConnectionError)" in m for m in msgs)
+
+
 def test_reasoning_effort별_max_tokens_예산():
     """effort별 요청 max_tokens 테이블 (사용자 확정값) + xhigh 모드 지원."""
     from app.translate.types import REASONING_MAX_TOKENS, TranslateConfig

@@ -3,6 +3,7 @@ name = "unlimited-ocr-web"
 version = "0.1.0"
 description = "PDF → Markdown 변환 웹 서비스 (baidu/Unlimited-OCR)"
 requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
 dependencies = [
     # ── 웹 ──
     "fastapi>=0.115",

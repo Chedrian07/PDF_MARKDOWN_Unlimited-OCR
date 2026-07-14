@@ -370,6 +370,20 @@ def test_래더_발명딜리미터_sanitize_제거(tmp_path, cfg):
     assert "$R$" in md_out                    # 실제 인라인 수식은 마스킹으로 보호돼 살아남음
 
 
+def test_kept_original_확정시_warning_로그(tmp_path, cfg, caplog):
+    """유닛이 최종 원문 유지로 확정되면 warning 1줄 — 유닛 id 등 식별자만 남고
+    문서 원문 내용은 로그에 없어야 한다."""
+    import logging
+
+    md = "The loss $L$ is minimized during the training here.\n"
+    with caplog.at_level(logging.WARNING, logger="app.translate.engine"):
+        res, _, _ = _run_md(tmp_path, cfg, md, FaultyClient())
+    assert res.kept_original == ["md:0:0"]
+    warned = [r.message for r in caplog.records if "원문 유지" in r.message]
+    assert len(warned) == 1 and "md:0:0" in warned[0]
+    assert "loss" not in warned[0]            # 원문 내용 무기록
+
+
 def test_초대형_표유닛은_행경계_분할로_복구(tmp_path, cfg):
     """HTML 표는 문장 분할 대상이 아니다 — </tr> 행 경계 분할(2a)이 잡아야 한다.
     전체(26태그)·repair 실패 → 반쪽(13태그) 성공 → 이어붙임이 원 구조와 동일."""

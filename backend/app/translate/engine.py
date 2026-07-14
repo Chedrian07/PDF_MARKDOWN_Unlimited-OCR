@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import json
+import logging
 import os
 import threading
 from datetime import datetime, timezone
@@ -26,6 +27,8 @@ from .glossary import Glossary, build_glossary
 from .masking import mask, sanitize_translation, should_skip, unmask
 from .segment import apply_layout, assemble_markdown, layout_units, split_markdown
 from .types import PROMPT_V, TranslateConfig, TranslateError, TranslateResult, cache_key
+
+logger = logging.getLogger(__name__)
 
 # 문장 경계 — 종결부호 뒤 공백. 분할 지점·분할 가능 판정에 함께 쓴다.
 _SENT_BOUND_RE = re.compile(r"(?<=[.!?…])\s+")
@@ -181,6 +184,7 @@ def run_translation(
         if client is None:
             client = OpenAICompatClient(cfg)
         write_state("running", 0, total)
+        logger.info("번역 시작: %s (lang=%s, 유닛 %d개, 건너뜀 %d)", job_dir.name, lang, total, skipped)
 
         # 용어집 — 있으면 로드(캐시 안정), 없거나 force면 빌드 후 저장
         gpath = tdir / "glossary.json"
@@ -392,6 +396,8 @@ def run_translation(
                         cache[key] = text
                     elif status == "kept":
                         kept_original.append(u.id)
+                        # 식별자만 기록 — 문서 원문·번역문 내용은 로그에 남기지 않는다
+                        logger.warning("번역 유닛 원문 유지: %s (lang=%s, unit=%s)", job_dir.name, lang, u.id)
                     done += 1
                     if progress is not None:
                         progress(done, total)
@@ -434,6 +440,10 @@ def run_translation(
             "warnings": warnings,
         })
         write_state("done", total, total)
+        logger.info(
+            "번역 완료: %s (lang=%s, 번역 %d·캐시 %d·원문유지 %d)",
+            job_dir.name, lang, translated_n, cached_n, len(kept_original),
+        )
         return TranslateResult(
             status="done", total=total, translated=translated_n, cached=cached_n,
             kept_original=kept_original, skipped=skipped, api_mode=api_mode,
@@ -443,5 +453,6 @@ def run_translation(
         write_state("error", done, total, error=str(e))
         raise
     except Exception as e:  # noqa: BLE001 — 사용자용 메시지로 감싸 재발생
+        logger.exception("번역 중 오류: %s (lang=%s)", job_dir.name, lang)
         write_state("error", done, total, error=f"번역 중 오류: {e}")
         raise TranslateError(f"번역 중 오류: {e}") from e
