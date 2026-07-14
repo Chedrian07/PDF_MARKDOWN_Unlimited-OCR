@@ -95,15 +95,20 @@ def _write_translate_state(job, lang: str, state: dict) -> None:
 
 def _stale_adjusted_state(request: Request, job, lang: str) -> dict | None:
     """state.json을 읽되 stale-running을 조정한다: status=="running"인데 레지스트리에
-    태스크가 없으면(서버 재시작 등) error로 원자적 재기록 후 반환. 파일이 없으면 None."""
+    태스크가 없으면(서버 재시작 등) error로 원자적 재기록 후 반환. 파일이 없으면 None.
+
+    순서 불변식: 레지스트리 확인 → state 읽기 (락 안에서 함께). 스레드는 최종 state를
+    기록한 뒤에야 레지스트리에서 빠지므로(_run_translate_thread finally), "없음"을
+    관찰한 뒤 읽은 state는 최종본이 보장된다 — read→check 순서면 그 사이 완료된
+    번역을 stale로 오판해 done을 error로 덮어쓴다. 락은 새 실행 등록(translate_start)
+    과도 직렬화해 "없음 관찰 직후 등록된 새 running"을 error로 덮는 창도 막는다."""
     st = _state(request)
-    state = _read_translate_state(job, lang)
-    if state is None:
-        return None
-    if state.get("status") == "running":
-        with st.translate_lock:
-            alive = (job.id, lang) in st.translate_tasks
-        if not alive:
+    with st.translate_lock:
+        alive = (job.id, lang) in st.translate_tasks
+        state = _read_translate_state(job, lang)
+        if state is None:
+            return None
+        if not alive and state.get("status") == "running":
             state["status"] = "error"
             state["error"] = "서버가 재시작되어 번역이 중단되었습니다 — 다시 실행하세요"
             _write_translate_state(job, lang, state)

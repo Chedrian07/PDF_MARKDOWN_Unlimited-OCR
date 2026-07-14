@@ -217,6 +217,28 @@ def test_graph_precheck_env_and_inputs(monkeypatch):
     assert _should_try_cuda_graph(ids, procs, model, 128) is True
 
 
+def test_graph_precheck_respects_graph_capable_marker(monkeypatch):
+    """graph_capable=False 마커(OCR_NGRAM_HOST 절연 레버) 프로세서는 그래프 금지 —
+    호스트 강제 절연이 GPU 상주 GraphNgram으로 조용히 대체되지 않게 한다."""
+    from app.engine.fast_decode import _should_try_cuda_graph
+    from app.native_ops import make_ngram_logits_processor
+
+    ids, procs, model = _graph_ready_stubs()
+    monkeypatch.delenv("OCR_CUDA_GRAPHS", raising=False)
+
+    banned = SimpleNamespace(ngram_size=35, window=128, graph_capable=False)
+    assert _should_try_cuda_graph(ids, [banned], model, 8) is False
+    # 마커가 True거나 없으면 기존 동작(그래프 허용) 유지
+    allowed = SimpleNamespace(ngram_size=35, window=128, graph_capable=True)
+    assert _should_try_cuda_graph(ids, [allowed], model, 8) is True
+    assert _should_try_cuda_graph(ids, procs, model, 8) is True
+
+    # 실제 강제 호스트 프로세서(OCR_NGRAM_HOST=1)도 동일하게 게이트된다
+    monkeypatch.setenv("OCR_NGRAM_HOST", "1")
+    forced = make_ngram_logits_processor(35, 128, "cuda")
+    assert _should_try_cuda_graph(ids, forced, model, 8) is False
+
+
 def test_cpu_decode_never_enters_graph_path(monkeypatch):
     """CPU 스텁 플로우는 그래프 함수를 절대 타지 않는다 (호출되면 즉시 실패)."""
     import app.engine.fast_decode as fd

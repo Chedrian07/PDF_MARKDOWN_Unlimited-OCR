@@ -61,9 +61,10 @@ def _should_try_cuda_graph(input_ids, processors, model, block: int) -> bool:
     """그래프 경로 발동 조건 — 하나라도 어긋나면 False(→ eager, 예외 아님).
 
     CUDA 입력 · env on · 프로세서가 ngram_size/window를 제공하는 **단일** ngram
-    (우리 ngram 하나라는 가정을 검증 — 다르면 폴백) · 링 윈도우 존재(정상상태
-    판정 기준) · block ≤ ngram window(블록 회수가 ngram 링 용량을 넘지 않게).
-    순수 파이썬 검사만 수행하므로 CPU 스텁으로 단위 검증 가능."""
+    (우리 ngram 하나라는 가정을 검증 — 다르면 폴백) · ``graph_capable=False``
+    마커 없음(OCR_NGRAM_HOST 절연 레버가 단 표식 — 그래프 대체 시 절연 무효) ·
+    링 윈도우 존재(정상상태 판정 기준) · block ≤ ngram window(블록 회수가 ngram
+    링 용량을 넘지 않게). 순수 파이썬 검사만 수행하므로 CPU 스텁으로 단위 검증 가능."""
     if not getattr(input_ids, "is_cuda", False):
         return False
     if not _cuda_graphs_enabled():
@@ -72,6 +73,8 @@ def _should_try_cuda_graph(input_ids, processors, model, block: int) -> bool:
         return False
     proc = processors[0]
     if not (hasattr(proc, "ngram_size") and hasattr(proc, "window")):
+        return False
+    if not getattr(proc, "graph_capable", True):  # 마커 없으면 기존 동작(그래프 허용)
         return False
     try:
         if int(block) > int(proc.window):

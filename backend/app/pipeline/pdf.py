@@ -70,6 +70,20 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
         drain_mupdf_warnings("업로드 검증")
 
 
+def _write_blank_page(doc, index: int, path: Path, dpi: int) -> None:
+    """렌더 실패 페이지의 대체 흰색 PNG — 페이지 크기를 못 읽으면 A4(pt) 기준."""
+    from PIL import Image
+
+    try:
+        rect = doc[index].rect
+        w_pt, h_pt = float(rect.width), float(rect.height)
+    except Exception:  # 페이지 객체 자체가 깨진 경우
+        w_pt, h_pt = 595.0, 842.0
+    scale = dpi / 72
+    size = (max(1, round(w_pt * scale)), max(1, round(h_pt * scale)))
+    Image.new("RGB", size, "white").save(path)
+
+
 def render_pdf_pages(
     pdf_path: Path,
     pages_dir: Path,
@@ -77,7 +91,10 @@ def render_pdf_pages(
     max_pages: int,
     progress_cb: Callable[[int, int], None] | None = None,
 ) -> list[Path]:
-    """모든 페이지를 pages_dir/page_%04d.png (1-based)로 렌더."""
+    """모든 페이지를 pages_dir/page_%04d.png (1-based)로 렌더.
+
+    한 페이지가 깨져도(get_pixmap 예외) 잡 전체를 죽이지 않는다 — 흰색 페이지로
+    대체하고 계속한다. 전 페이지 실패 시에만 ValueError."""
     fitz = quiet_fitz()
 
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -92,13 +109,24 @@ def render_pdf_pages(
             raise ValueError(f"페이지 수({n})가 상한({max_pages})을 초과합니다")
         mat = fitz.Matrix(dpi / 72, dpi / 72)
         out: list[Path] = []
+        failed = 0
+        last_err: Exception | None = None
         for i in range(n):
-            pix = doc[i].get_pixmap(matrix=mat)
             p = pages_dir / f"page_{i + 1:04d}.png"
-            pix.save(str(p))
+            try:
+                pix = doc[i].get_pixmap(matrix=mat)
+                pix.save(str(p))
+            except Exception as e:  # noqa: BLE001 — 페이지 단위 격리
+                failed += 1
+                last_err = e
+                logger.warning("페이지 %d/%d 렌더 실패 (%s: %s) — 흰색 페이지로 대체",
+                               i + 1, n, e.__class__.__name__, str(e)[:200])
+                _write_blank_page(doc, i, p, dpi)
             out.append(p)
             if progress_cb:
                 progress_cb(i + 1, n)
+        if failed == n:
+            raise ValueError(f"모든 페이지({n}) 렌더에 실패했습니다: {last_err}") from last_err
         return out
     finally:
         doc.close()

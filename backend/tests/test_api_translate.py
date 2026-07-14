@@ -315,6 +315,51 @@ def test_translate_state_stale_adjusted(client, sample_pdf, settings):
     assert _tstate(client, jid)["status"] == "error"
 
 
+# ── 6b. 레이스 회귀: state 읽기와 레지스트리 확인 사이 완료 → done 보존 ─────
+def test_translate_state_race_done_preserved(client, sample_pdf, settings, monkeypatch):
+    """read→check 순서 레이스 회귀: running을 읽은 직후 스레드가 완료(최종 done 기록
+    → 레지스트리 제거)되어도 done을 error로 덮어쓰면 안 된다. _read_translate_state를
+    감싸 읽기 직후에 스레드 완료 시퀀스를 그대로 재현한다."""
+    import app.api as api_mod
+
+    jid = _done_job(client, sample_pdf)
+    tdir = settings.jobs_dir / jid / "translations" / "ko"
+    tdir.mkdir(parents=True, exist_ok=True)
+    state_path = tdir / "state.json"
+    state_path.write_text(json.dumps({
+        "lang": "ko", "status": "running", "current": 1, "total": 3, "error": None,
+    }), encoding="utf-8")
+
+    # 스레드가 아직 실행 중인 것처럼 레지스트리에 태스크를 넣어둔다
+    st = client.app.state
+    st.translate_tasks[(jid, "ko")] = {"thread": None, "cancel": threading.Event()}
+
+    real_read = api_mod._read_translate_state
+    fired = threading.Event()
+
+    def racy_read(job, lang):
+        state = real_read(job, lang)
+        if not fired.is_set():
+            fired.set()
+            # 스레드 완료 시퀀스 재현: 최종 state 기록 → 레지스트리 제거 (이 순서 그대로).
+            # 호출자가 translate_lock을 쥔 채일 수 있으므로 락 없이 직접 pop한다.
+            state_path.write_text(json.dumps({
+                "lang": "ko", "status": "done", "current": 3, "total": 3, "error": None,
+            }), encoding="utf-8")
+            st.translate_tasks.pop((jid, "ko"), None)
+        return state
+
+    monkeypatch.setattr("app.api._read_translate_state", racy_read)
+
+    body = _tstate(client, jid)
+    assert fired.is_set()
+    assert body["status"] != "error", body  # 완료 직전 running을 stale로 오판 금지
+    # 디스크의 최종 done이 보존된다 (error 덮어쓰기 금지)
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "done"
+    # 재조회(레지스트리 확인 전에 이미 done이 써진 경우): 터미널 상태 그대로 반환
+    assert _tstate(client, jid)["status"] == "done"
+
+
 # ── 7. /archive에 result.ko.md 포함 (캐시 삭제 후 재생성) ──────────────────
 def test_archive_includes_translation(client, sample_pdf, provider_env, monkeypatch):
     monkeypatch.setattr("app.api.run_translation", _make_fake())

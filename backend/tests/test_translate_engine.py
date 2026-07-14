@@ -384,6 +384,106 @@ def test_kept_original_확정시_warning_로그(tmp_path, cfg, caplog):
     assert "loss" not in warned[0]            # 원문 내용 무기록
 
 
+# ── 실패 경로 뒷정리 (2026-07-14 감사: 분할의 수식 훼손·오류 시 큐 드레인) ────
+
+def test_split_two_수식블록_내부경계는_안자름():
+    """$$ 블록 내부 문장 경계(x_i. 뒤)는 분할 후보에서 제외 — 토큰 한가운데를 자르면
+    반쪽의 짝 잃은 $$가 mask()에 안 잡혀 원시 LaTeX 노출→sanitize 삭제(조용한 훼손)."""
+    from app.translate.engine import _split_two
+    from app.translate.masking import mask
+
+    src = (
+        "The estimator follows. $$\n"
+        "\\hat{\\theta} = \\arg\\min_i x_i. \\text{Then the bound holds.}\n"
+        "$$ This completes the proof of the theorem."
+    )
+    halves = _split_two(src)
+    assert halves is not None                    # 토큰 밖 경계(follows. 뒤)에서는 분할 가능
+    for half in halves:
+        assert half.count("$$") % 2 == 0         # $$ 짝 보존 — 토큰 내부를 자르지 않았다
+    math_half = next(h for h in halves if "$$" in h)
+    masked, mapping = mask(math_half)
+    assert mapping                               # 반쪽 mask()가 수식을 온전히 토큰으로 회수
+    assert any(v.startswith("$$") and v.endswith("$$") for v in mapping.values())
+    # 플레이스홀더 태그(v 미리보기 포함) 밖에는 원시 LaTeX가 남지 않는다
+    import re
+    residual = re.sub(r"<[mkgucft]\d+\b[^>]*>", "", masked)
+    assert "$$" not in residual and "\\hat" not in residual
+
+
+def test_split_two_경계가_전부_토큰내부면_분할포기():
+    """문장 경계가 전부 $$ 블록 안이면 None — 호출자가 분할을 포기하고 kept 경로."""
+    from app.translate.engine import _split_two
+
+    src = "Consider $$\na = b. \\text{Then. } c = d\n$$ QED"
+    assert _split_two(src) is None
+
+
+def test_래더_분할이_수식블록을_훼손하지_않음(tmp_path, cfg):
+    """검증자 재현: $$ 블록 내부에 문장 경계가 있는 유닛 — 종전엔 분할이 수식 한가운데를
+    잘라 sanitize가 잔여 $$를 지우고 '번역 성공'으로 위장됐다. 수정 후엔 안전한 경계에서만
+    자르고, 수식 반쪽 실패 시 원문 유지로 귀결돼 $$ 블록이 그대로 남는다(무손실)."""
+    md = (
+        "The estimator follows. $$\n"
+        "\\hat{\\theta} = \\arg\\min_i x_i. \\text{Then the bound holds.}\n"
+        "$$ This completes the proof of the theorem.\n"
+    )
+    res, report, md_out = _run_md(tmp_path, cfg, md, FaultyClient())
+    assert res.status == "done"
+    assert "md:0:0" in res.kept_original         # 수식 반쪽 실패 → 무손실 원문 유지
+    assert md_out.count("$$") == 2               # $$ 블록 보존 — 조용한 삭제 없음
+    assert "\\hat{\\theta}" in md_out
+    assert report["split"] == 0                  # 분할 '성공'으로 위장되지 않는다
+
+
+def test_step0_API오류시_큐드레인_방지_및_부분캐시_flush(tmp_path, cfg):
+    """step-0 API 오류는 잡 전체 실패로 전파(기존 계약)하되, 남은 futures 취소 + abort로
+    큐 드레인(죽은 엔드포인트 × 유닛별 백오프)을 막는다. flush_cache는 finally라 오류
+    전에 완료된 유닛 번역도 캐시에 보존된다."""
+    import time
+
+    from app.translate.types import TranslateAPIError, TranslateError
+
+    class DeadEndpointClient(EchoClient):
+        """유닛 호출 4회는 에코 성공, 이후 전부 API 오류(왕복 50ms) — 죽은 엔드포인트."""
+
+        def __init__(self):
+            super().__init__()
+            self.unit_calls = 0
+            self._lock = threading.Lock()
+
+        def complete(self, system, user, *, max_tokens):
+            src = _marker(user)
+            with self._lock:
+                self.calls += 1
+                if src is None:
+                    return ""                    # 용어집 프롬프트 → 시드 폴백
+                self.unit_calls += 1
+                n = self.unit_calls
+            if n <= 4:
+                return src
+            time.sleep(0.05)                     # 네트워크 왕복 재현 — 메인 스레드가 abort할 틈
+            raise TranslateAPIError("번역 API 연결 실패: dead endpoint")
+
+    md = SEP.join(
+        f"Paragraph number {i} explains the training procedure in detail." for i in range(30)
+    ) + "\n"
+    (tmp_path / "result.md").write_text(md, encoding="utf-8")
+
+    client = DeadEndpointClient()
+    with pytest.raises(TranslateError):
+        run_translation(tmp_path, "ko", cfg, client=client)  # cfg.concurrency == 2
+
+    # 드레인 방지 — 남은 큐(30유닛)가 죽은 엔드포인트를 전부 두드리지 않는다 (종전 30회)
+    assert client.unit_calls < 15
+    assert _state(tmp_path)["status"] == "error"
+    # finally flush — 오류 전에 완료된 4유닛의 번역이 유닛 캐시에 남아있다
+    units = json.loads(
+        (tmp_path / "translations" / "ko" / "units.json").read_text(encoding="utf-8")
+    )
+    assert len(units) == 4
+
+
 def test_초대형_표유닛은_행경계_분할로_복구(tmp_path, cfg):
     """HTML 표는 문장 분할 대상이 아니다 — </tr> 행 경계 분할(2a)이 잡아야 한다.
     전체(26태그)·repair 실패 → 반쪽(13태그) 성공 → 이어붙임이 원 구조와 동일."""

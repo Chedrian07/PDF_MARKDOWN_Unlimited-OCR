@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..engine.base import JobCanceled, OCREngine
+from ..engine.base import EngineError, JobCanceled, OCREngine
 from .merge import ChunkResult, IncrementalMerger
 from .pdf import render_pdf_pages
 
@@ -77,6 +77,48 @@ def _chunked(items: list[Path], size: int) -> list[list[Path]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+_FAILED_PAGE_MD = "> ⚠️ 이 페이지는 변환에 실패했습니다"
+
+
+def _empty_device_cache() -> None:
+    """실패한 청크 재시도 전 디바이스 캐시 반환 — OOM류 실패 후 가용 메모리 복구.
+    (unlimited.py의 _release_device_cache와 동일한 best-effort empty_cache 패턴)"""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:  # pragma: no cover — 방어적 (torch 미설치 등)
+        pass
+
+
+def _add_failed_chunk(
+    merger: IncrementalMerger,
+    work_dir: Path,
+    start_page: int,
+    num_pages: int,
+    single: bool,
+    err: Exception,
+) -> None:
+    """재시도까지 실패한 청크를 기대 페이지 수만큼의 플레이스홀더로 보정.
+
+    merge의 <PAGE> 계약(청크당 num_pages개 페이지)을 그대로 지켜 글로벌 페이지
+    번호 정합을 유지하고, warnings에 남긴 뒤 다음 청크로 계속하게 한다."""
+    work_dir.mkdir(parents=True, exist_ok=True)  # 엔진이 만들기 전에 실패했을 수 있음
+    if single:
+        md = _FAILED_PAGE_MD
+    else:
+        md = "<PAGE>\n" + "\n<PAGE>\n".join([_FAILED_PAGE_MD] * num_pages)
+    merger.add_chunk(ChunkResult(work_dir, start_page, num_pages, md, single=single))
+    end = start_page + num_pages - 1
+    span = f"{start_page}페이지" if num_pages == 1 else f"{start_page}–{end}페이지"
+    merger.warnings.append(
+        f"{span}: 변환 실패로 플레이스홀더 삽입 ({err.__class__.__name__}: {str(err)[:200]})"
+    )
+
+
 def execute_job(
     job: "Job",
     store: "JobStore",
@@ -115,6 +157,8 @@ def execute_job(
 
         merger = IncrementalMerger(job.dir, settings.page_separator)
         done_pages = 0
+        failed_chunks = 0
+        last_chunk_error: Exception | None = None
         for ci, chunk in enumerate(chunks):
             if cancel.is_set():
                 raise JobCanceled()
@@ -124,13 +168,48 @@ def execute_job(
             broker.publish_progress(job)
 
             work_dir = job.dir / "work" / f"chunk_{ci:02d}"
-            sink.set_chunk(start_page)
-            if job.mode == "per_page":
-                md = engine.run_single(chunk[0], work_dir, sink, cancel)
-                merger.add_chunk(ChunkResult(work_dir, start_page, 1, md, single=True))
-            else:
-                md = engine.run_multi(chunk, work_dir, sink, cancel)
-                merger.add_chunk(ChunkResult(work_dir, start_page, len(chunk), md))
+
+            def _run_engine() -> str:
+                sink.set_chunk(start_page)
+                if job.mode == "per_page":
+                    return engine.run_single(chunk[0], work_dir, sink, cancel)
+                return engine.run_multi(chunk, work_dir, sink, cancel)
+
+            # 청크 단위 격리: 한 청크가 죽어도(OOM·벤더 예외 등) 잡 전체를 죽이지
+            # 않는다 — 캐시 해제 후 1회 재시도, 그래도 실패하면 플레이스홀더로
+            # 보정하고 계속. 취소(JobCanceled)는 절대 삼키지 않고 그대로 전파.
+            # 재시도는 엔진 실행만 감싼다 — add_chunk는 비멱등(pages_md 확장)이라
+            # 재시도에 포함하면 병합 도중 실패 시 페이지가 중복 병합될 수 있다.
+            md: str | None = None
+            try:
+                md = _run_engine()
+            except JobCanceled:
+                raise
+            except Exception as e:  # noqa: BLE001 — 청크 단위 격리
+                logger.warning("청크 %d/%d 실패 (%s: %s) — 캐시 해제 후 1회 재시도",
+                               ci + 1, len(chunks), e.__class__.__name__, str(e)[:200])
+                _empty_device_cache()
+                if cancel.is_set():
+                    raise JobCanceled() from None
+                try:
+                    md = _run_engine()
+                except JobCanceled:
+                    raise
+                except Exception as e2:  # noqa: BLE001
+                    logger.warning("청크 %d/%d 재시도 실패 (%s: %s) — 플레이스홀더로 보정 후 계속",
+                                   ci + 1, len(chunks), e2.__class__.__name__, str(e2)[:200])
+                    failed_chunks += 1
+                    last_chunk_error = e2
+                    _add_failed_chunk(
+                        merger, work_dir, start_page, len(chunk), job.mode == "per_page", e2
+                    )
+            if md is not None:
+                # 병합은 엔진 성공 시 1회만 — 병합 실패는 잡 레벨 IO 오류로 취급한다.
+                merger.add_chunk(
+                    ChunkResult(work_dir, start_page,
+                                1 if job.mode == "per_page" else len(chunk),
+                                md, single=job.mode == "per_page")
+                )
             sink.flush()
             # 취소돼도 이 청크의 부분 출력까지는 병합 후에 중단한다
             if cancel.is_set():
@@ -140,6 +219,12 @@ def execute_job(
             job.progress["current_page"] = done_pages
             store.save(job)
             broker.publish_progress(job)
+
+        # 전 청크 실패면 부분 성공이 없으므로 기존대로 잡 오류로 마감
+        if chunks and failed_chunks == len(chunks):
+            raise EngineError(
+                f"모든 청크({len(chunks)}개) 변환에 실패했습니다: {last_chunk_error}"
+            ) from last_chunk_error
 
         job.progress["phase"] = "merge"
         broker.publish_progress(job)

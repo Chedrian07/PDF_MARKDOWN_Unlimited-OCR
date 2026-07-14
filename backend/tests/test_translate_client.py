@@ -192,6 +192,33 @@ def test_잘림_재시도도_잘리면_재시도_출력_반환():
     assert c.complete("s", "u", max_tokens=100) == "AB"
 
 
+def test_잘림_재시도_API오류면_잘린_첫출력_반환(caplog):
+    """2배 재시도가 TranslateAPIError로 실패해도 잘린 첫 출력이 있으면 그것을 반환 — 래더가 흡수."""
+    import logging
+
+    seq = iter([
+        (200, {"choices": [{"message": {"content": "잘린 절반"}, "finish_reason": "length"}]}, {}),
+        (400, "bad request", {}),  # 2배 재시도 — 비재시도 상태코드로 즉시 TranslateAPIError
+    ])
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: next(seq)
+    with caplog.at_level(logging.WARNING, logger="app.translate.client"):
+        assert c.complete("s", "u", max_tokens=100) == "잘린 절반"
+    assert any("2배 재시도 실패" in r.message for r in caplog.records)
+
+
+def test_잘림_재시도_API오류_첫출력도_비면_예외전파():
+    """첫 출력이 비어 있으면(전부 잘림) 재시도 실패 예외를 그대로 전파한다."""
+    seq = iter([
+        (200, {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}, {}),
+        (400, "bad request", {}),
+    ])
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = lambda p, pl: next(seq)
+    with pytest.raises(TranslateAPIError, match="HTTP 400"):
+        c.complete("s", "u", max_tokens=100)
+
+
 def test_잘림_빈출력_reasoning_예산소진_재시도로_회복():
     """thinking이 예산을 다 먹어 content가 비어도 '빈 응답' 오류 대신 재시도."""
     seq = iter([
@@ -267,6 +294,47 @@ def test_연결오류_재시도_warning_로그(caplog):
         assert c.complete("s", "u", max_tokens=100) == "성공"
     msgs = [r.message for r in caplog.records]
     assert any("연결 오류(ConnectionError)" in m for m in msgs)
+
+
+def test_연결오류_ChunkedEncodingError_재시도로_회복(caplog):
+    """본문 수신 중 끊김(RequestException 계열, ConnectionError 비상속)도 재시도한다."""
+    import logging
+
+    import requests as _requests
+
+    calls = []
+
+    def post(p, pl):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _requests.exceptions.ChunkedEncodingError("본문 수신 중 끊김")
+        return (200, {"choices": [{"message": {"content": "성공"}}]}, {})
+
+    c = OpenAICompatClient(_cfg(api_mode="chat"))
+    c._post = post
+    c._backoff = lambda headers, attempt: 0.0                          # 테스트 대기 제거
+    with caplog.at_level(logging.WARNING, logger="app.translate.client"):
+        assert c.complete("s", "u", max_tokens=100) == "성공"
+    assert len(calls) == 2
+    assert any("연결 오류(ChunkedEncodingError)" in r.message for r in caplog.records)
+
+
+def test_연결오류_계속_실패면_TranslateAPIError_래핑():
+    """재시도 예산 소진 시 기존 ConnectionError 경로와 동일하게 TranslateAPIError로 전파."""
+    import requests as _requests
+
+    calls = []
+
+    def post(p, pl):
+        calls.append(1)
+        raise _requests.exceptions.ContentDecodingError("깨진 응답")
+
+    c = OpenAICompatClient(_cfg(api_mode="chat", max_retries=1))
+    c._post = post
+    c._backoff = lambda headers, attempt: 0.0                          # 테스트 대기 제거
+    with pytest.raises(TranslateAPIError, match="연결 실패"):
+        c.complete("s", "u", max_tokens=100)
+    assert len(calls) == 2                                             # 최초 1 + 재시도 1
 
 
 def test_reasoning_effort별_max_tokens_예산():

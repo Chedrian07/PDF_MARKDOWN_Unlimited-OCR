@@ -75,7 +75,14 @@ class OpenAICompatClient:
         # max_tokens 파라미터를 아예 안 보내는 설정(none)이면 같은 요청의 반복이라 생략.
         if self.cfg.max_tokens_param != "none":
             logger.warning("번역 API 출력 잘림 — max_tokens %d→%d로 1회 재시도", max_tokens, max_tokens * 2)
-            retry_text, _ = self._complete_once(system, user, max_tokens * 2)
+            try:
+                retry_text, _ = self._complete_once(system, user, max_tokens * 2)
+            except TranslateAPIError as e:
+                # 2배 재시도가 실패해도 잘린 첫 출력이 있으면 버리지 않는다 — 래더가 흡수.
+                if not text:
+                    raise
+                logger.warning("번역 API 잘림 2배 재시도 실패(%s) — 잘린 첫 출력을 사용", type(e).__name__)
+                return text
             if retry_text:
                 return retry_text  # 여전히 잘렸어도 더 긴 출력 — 래더가 흡수
         if text:
@@ -151,7 +158,11 @@ class OpenAICompatClient:
         while True:
             try:
                 status, body, headers = self._post(path, payload)
-            except (requests.ConnectionError, requests.Timeout) as e:
+            except requests.RequestException as e:
+                # ConnectionError·Timeout뿐 아니라 본문 수신 중 끊김(ChunkedEncodingError·
+                # ContentDecodingError 등 RequestException 계열, ConnectionError 비상속)도
+                # 일시적 네트워크 결함이므로 같은 백오프로 재시도한다. HTTP 상태코드 분기는
+                # _post가 응답을 반환한 경우(아래)라 이 절과 무관하다.
                 if attempt < self.cfg.max_retries:
                     wait = self._backoff({}, attempt)
                     logger.warning(

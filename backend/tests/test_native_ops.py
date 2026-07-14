@@ -225,3 +225,18 @@ def test_ngram_host_강제_레버(monkeypatch):
     monkeypatch.setenv("OCR_NGRAM_HOST", "1")
     assert isinstance(make_ngram_logits_processor(30, 128, "mps")[0], HostSlidingWindowNoRepeatNgram)
     assert isinstance(make_ngram_logits_processor(30, 128, "cuda")[0], HostSlidingWindowNoRepeatNgram)
+
+
+def test_ngram_host_레버_그래프_비허용_마커(monkeypatch):
+    """강제 호스트 프로세서는 graph_capable=False — CUDA 그래프 경로가 GraphNgram으로
+    바꿔치기해 절연을 조용히 무효화하는 함정 방지. 기본 경로는 마커 없이 그래프 허용."""
+    from app.native_ops import make_ngram_logits_processor
+
+    monkeypatch.setenv("OCR_NGRAM_HOST", "1")
+    for dev in ("cuda", "mps", "cpu"):
+        assert make_ngram_logits_processor(30, 128, dev)[0].graph_capable is False, dev
+
+    monkeypatch.delenv("OCR_NGRAM_HOST", raising=False)
+    for dev in ("cuda", "mps", "cpu"):
+        proc = make_ngram_logits_processor(30, 128, dev)[0]
+        assert getattr(proc, "graph_capable", True) is True, dev  # 마커 없음 = 그래프 허용

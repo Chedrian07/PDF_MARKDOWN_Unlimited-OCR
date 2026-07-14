@@ -57,6 +57,46 @@ def test_render_progress_cb_예외가_즉시_중단(tmp_path):
     assert calls == [1]  # 첫 페이지 직후 중단 — 나머지는 렌더되지 않음
 
 
+def test_render_page_failure_replaced_with_blank(tmp_path, monkeypatch, caplog):
+    """한 페이지의 get_pixmap 실패는 흰색 페이지로 대체되고 렌더는 계속된다
+    — 페이지 수·파일명 정합은 유지 (청크/글로벌 페이지 번호 계약)."""
+    import fitz
+    from PIL import Image
+
+    pdf = _write_pdf(tmp_path, pages=3)
+    orig = fitz.Page.get_pixmap
+
+    def flaky(self, *a, **kw):
+        if self.number == 1:  # 2번째 페이지만 실패
+            raise RuntimeError("모의 pixmap 실패")
+        return orig(self, *a, **kw)
+
+    monkeypatch.setattr(fitz.Page, "get_pixmap", flaky)
+    with caplog.at_level(logging.WARNING, logger="app.pipeline.pdf"):
+        out = render_pdf_pages(pdf, tmp_path / "pages", dpi=100, max_pages=10)
+    assert [p.name for p in out] == ["page_0001.png", "page_0002.png", "page_0003.png"]
+    with Image.open(out[1]) as blank, Image.open(out[0]) as good:
+        # 전면 흰색 + 정상 페이지와 같은 크기(반올림 오차 허용)
+        assert blank.convert("RGB").getextrema() == ((255, 255), (255, 255), (255, 255))
+        assert abs(blank.size[0] - good.size[0]) <= 2
+        assert abs(blank.size[1] - good.size[1]) <= 2
+    assert any("흰색 페이지로 대체" in r.message for r in caplog.records)
+
+
+def test_render_all_pages_failed_raises(tmp_path, monkeypatch):
+    """전 페이지 렌더 실패 시에만 잡 오류(ValueError)로 승격된다."""
+    import fitz
+
+    pdf = _write_pdf(tmp_path, pages=2)
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("모의 pixmap 실패")
+
+    monkeypatch.setattr(fitz.Page, "get_pixmap", boom)
+    with pytest.raises(ValueError, match="모든 페이지"):
+        render_pdf_pages(pdf, tmp_path / "pages", dpi=100, max_pages=10)
+
+
 def test_probe_pdf_limits(tmp_path):
     pdf = _write_pdf(tmp_path, pages=3)
     assert probe_pdf(pdf, max_pages=10) == 3

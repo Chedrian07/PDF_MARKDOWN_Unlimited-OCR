@@ -225,10 +225,16 @@ def make_ngram_logits_processor(ngram_size: int, window: int, device_type: str =
     device_type: torch 디바이스 문자열 (cpu | cuda | mps)
 
     OCR_NGRAM_HOST=1이면 GPU/MPS에서도 호스트(C++/파이썬) 티어를 강제한다 —
-    MPS scatter류 이슈(P11 전례) 절연용 디버그 레버."""
+    MPS scatter류 이슈(P11 전례) 절연용 디버그 레버. 강제된 프로세서에는
+    graph_capable=False를 달아 CUDA 그래프 경로의 GraphNgram 대체도 막는다."""
     import os
 
     force_host = os.environ.get("OCR_NGRAM_HOST", "").strip().lower() in ("1", "true", "yes", "on")
     if device_type in ("cuda", "mps") and not force_host:
         return [TorchSlidingWindowNoRepeatNgram(ngram_size, window)]
-    return [HostSlidingWindowNoRepeatNgram(ngram_size, window)]
+    proc = HostSlidingWindowNoRepeatNgram(ngram_size, window)
+    if force_host:
+        # 절연 레버로 강제된 프로세서는 CUDA 그래프 대체 금지 마커 — 그래프 경로가
+        # GPU 상주 GraphNgram으로 바꿔치기하면 절연이 조용히 무효가 된다.
+        proc.graph_capable = False
+    return [proc]
