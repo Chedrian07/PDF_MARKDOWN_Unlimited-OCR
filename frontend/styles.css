@@ -684,6 +684,16 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
   font-style: italic;
   font-size: 12.5px;
 }
+/* 프리뷰 중단 안내 한 줄 (413/연속 실패) — 블록 카드 룩 대신 잔잔한 노트 */
+.live-preview.markdown-body > .lp-note {
+  border: none;
+  padding: 10px 8px;
+  margin: 0;
+  color: var(--text-subtle);
+  font-style: italic;
+  font-size: 12.5px;
+  text-align: center;
+}
 
 /* stop button */
 .btn-stop { background: #e5484d; border-color: #e5484d; color: #ffffff; }

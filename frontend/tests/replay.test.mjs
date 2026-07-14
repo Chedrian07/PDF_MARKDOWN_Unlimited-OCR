@@ -22,10 +22,15 @@ import {
   groundPush,
   groundDrain,
   structurePreview,
+  splitPreviewPages,
+  planPreviewRender,
   incompleteTailIndex,
   scanQuads,
+  ssePromoteDelay,
+  syncedStreamPageNo,
   withLangUrl,
   translateUiStateFor,
+  armTransition,
 } from '../app.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -392,6 +397,144 @@ test('structurer: fake-engine plain markdown passes through with page separators
   assert.ok(!md.includes(PAGE_MARKER));
 });
 
+/* ================= live preview incremental split/plan ================= */
+
+test('splitPreviewPages: 뒤에 새 페이지가 시작된 세그먼트만 확정, 나머지는 꼬리', () => {
+  assert.deepEqual(splitPreviewPages(''), { pages: [], tail: '' });
+  assert.deepEqual(splitPreviewPages('no marker yet'), { pages: [], tail: 'no marker yet' });
+  assert.deepEqual(splitPreviewPages('<PAGE>p1<PAGE>p2<PAGE>p3'),
+    { pages: ['', 'p1', 'p2'], tail: 'p3' });
+});
+
+test('splitPreviewPages: 조각난 마커(<PA + GE>)는 완성 전까지 경계가 아니다', () => {
+  const a = '<PAGE>one<PA';
+  assert.deepEqual(splitPreviewPages(a), { pages: [''], tail: 'one<PA' });
+  const b = a + 'GE>two'; // 다음 청크로 마커 완성 → one이 확정된다
+  assert.deepEqual(splitPreviewPages(b), { pages: ['', 'one'], tail: 'two' });
+});
+
+test('splitPreviewPages: 확정 프리픽스는 append에 안정 — 캐시 재사용 가능', () => {
+  const raw1 = '<PAGE>alpha<PAGE>beta';
+  const raw2 = raw1 + ' more tail';
+  assert.deepEqual(splitPreviewPages(raw2).pages, splitPreviewPages(raw1).pages);
+  assert.equal(splitPreviewPages(raw2).tail, 'beta more tail');
+});
+
+const det = (label, text) => `<|det|>${label} [1,1,9,9]<|/det|>${text}\n`;
+
+test('planPreviewRender: 첫 사이클 — 확정 페이지 + 꼬리, hr(sep)은 앞 내용이 있을 때만', () => {
+  const raw = '<PAGE>' + det('text', 'p1 body') + '<PAGE>' + det('text', 'p2 tail');
+  const plan = planPreviewRender(raw, [], '', false);
+  // 확정 세그먼트: 첫 마커 앞 ''(빈) + p1
+  assert.equal(plan.newPages.length, 2);
+  assert.deepEqual(plan.newPages.map((p) => p.idx), [0, 1]);
+  assert.equal(plan.newPages[0].md, '');
+  assert.equal(plan.newPages[1].md, 'p1 body');
+  assert.equal(plan.newPages[1].sep, false, '첫 내용 페이지 앞에는 hr 없음');
+  assert.equal(plan.tailMd, 'p2 tail');
+  assert.equal(plan.tailSep, true, '확정 내용 뒤 꼬리 → hr');
+  assert.equal(plan.tailChanged, true);
+});
+
+test('planPreviewRender: 꼬리만 변하는 경우 — 확정 페이지 캐시 재사용, 재렌더 없음', () => {
+  const raw1 = '<PAGE>' + det('text', 'p1 body') + '<PAGE>' + det('text', 'p2');
+  const cache = ['', '<p>p1 body</p>']; // 사이클 1이 채운 확정 페이지 HTML 캐시
+  const plan1 = planPreviewRender(raw1, cache, '', false);
+  assert.equal(plan1.newPages.length, 0, '캐시된 확정 페이지는 다시 렌더하지 않는다');
+  assert.equal(plan1.tailMd, 'p2');
+  // 꼬리에 토큰이 더 붙으면 꼬리만 재렌더 대상
+  const raw2 = raw1 + det('text', 'p2 more');
+  const plan2 = planPreviewRender(raw2, cache, plan1.tailMd, plan1.tailSep);
+  assert.equal(plan2.newPages.length, 0);
+  assert.equal(plan2.tailChanged, true);
+  assert.ok(plan2.tailMd.includes('p2 more'));
+  // 아무것도 변하지 않으면 POST 자체를 생략한다
+  const plan3 = planPreviewRender(raw2, cache, plan2.tailMd, plan2.tailSep);
+  assert.equal(plan3.newPages.length, 0);
+  assert.equal(plan3.tailChanged, false);
+});
+
+test('planPreviewRender: 같은 꼬리 md라도 sep이 바뀌면 재렌더 대상', () => {
+  const plan1 = planPreviewRender('<PAGE>x', [], '', false);
+  assert.equal(plan1.tailMd, 'x');
+  assert.equal(plan1.tailSep, false);
+  // 내용 있는 페이지가 확정되면 같은 'x' 꼬리라도 앞에 hr이 필요하다
+  const plan2 = planPreviewRender('<PAGE>x<PAGE>x', ['', '<p>x</p>'], plan1.tailMd, plan1.tailSep);
+  assert.equal(plan2.tailMd, plan1.tailMd);
+  assert.equal(plan2.tailSep, true);
+  assert.equal(plan2.tailChanged, true);
+});
+
+test('planPreviewRender: 증분 조각을 이어 붙이면 전체 structurePreview와 동치', () => {
+  const { raw } = replay(realEvents);
+  const plan = planPreviewRender(raw, [], '', false);
+  const parts = [];
+  for (const p of plan.newPages) {
+    if (!p.md) continue;
+    if (p.sep) parts.push('---');
+    parts.push(p.md);
+  }
+  if (plan.tailMd) {
+    if (plan.tailSep) parts.push('---');
+    parts.push(plan.tailMd);
+  }
+  assert.equal(parts.join('\n\n'), structurePreview(raw, false));
+});
+
+/* ================= SSE 폴링 강등 → 재승격 백오프 ================= */
+
+test('ssePromoteDelay: 10초 → 20초 → 30초 상한 백오프', () => {
+  assert.equal(ssePromoteDelay(0), 10000);
+  assert.equal(ssePromoteDelay(1), 20000);
+  assert.equal(ssePromoteDelay(2), 30000);
+  assert.equal(ssePromoteDelay(9), 30000, '상한 30초를 넘지 않는다');
+  assert.equal(ssePromoteDelay(undefined), 10000, '방어: 미지 입력은 첫 단계');
+});
+
+test('syncedStreamPageNo: 정상 흐름에서는 항상 no-op (디바이더 = 마커 카운트)', () => {
+  const g = createGroundState();
+  let pane = 0; // flushStream이 마커마다 올리는 streamPageNo 시뮬레이션
+  const feed = (text) => {
+    pane += (text.match(/<PAGE>/g) || []).length;
+    groundPush(g, text);
+    groundDrain(g, false);
+  };
+  assert.equal(syncedStreamPageNo(pane, g), 0, '잡 시작: 다음 마커가 페이지 1 시작 → 0 유지');
+  groundAnnounce(g, 'ocr', 1, 3);
+  feed('<PAGE>p1 ');
+  assert.equal(syncedStreamPageNo(pane, g), pane);
+  groundAnnounce(g, 'ocr', 2, 3); // 선언 → 마커 (문법 순서)
+  assert.equal(syncedStreamPageNo(pane, g), pane, '선언 직후(마커 전)에도 no-op');
+  feed('<PAGE>p2 ');
+  assert.equal(syncedStreamPageNo(pane, g), pane);
+  feed('<PAGE>p3 '); // 선언 없는 마커(+1 경로)
+  assert.equal(syncedStreamPageNo(pane, g), pane);
+});
+
+test('syncedStreamPageNo: 재연결 갭 뒤 디바이더 번호를 ground 페이지로 재동기화', () => {
+  const g = createGroundState();
+  // 페이지 3 마커까지 정상 수신(pane=3) 후 스트림 단절 — 갭 동안 폴링
+  // announce가 페이지 7까지 진행시키고 마커 4~7은 유실됐다.
+  groundAnnounce(g, 'ocr', 3, 25);
+  groundPush(g, '<PAGE>');
+  groundDrain(g, false);
+  groundAnnounce(g, 'ocr', 7, 25); // 갭 동안의 마지막 선언 (expectAnnounce=true)
+  assert.equal(syncedStreamPageNo(3, g), 6, '다음 마커는 7 시작 → 6으로 끌어올림');
+  // 페이지 7의 마커가 소비된 뒤라면 다음 마커는 8 시작 → 7
+  groundPush(g, '<PAGE>');
+  groundDrain(g, false);
+  assert.equal(syncedStreamPageNo(3, g), 7);
+  assert.equal(syncedStreamPageNo(7, g), 7, '이미 맞으면 no-op');
+  assert.equal(syncedStreamPageNo(9, g), 9, '절대 뒤로 가지 않는다 (여분 마커 허용)');
+});
+
+test('syncedStreamPageNo: 실행 중 잡을 중간에 연 경우(스냅샷 선언) 첫 디바이더 보정', () => {
+  const g = createGroundState();
+  groundAnnounce(g, 'ocr', 42, 100); // openJob 스냅샷이 페이지를 시드
+  // streamPageNo=0이라면 다음 마커의 디바이더는 "페이지 42"여야 한다 → 41
+  assert.equal(syncedStreamPageNo(0, g), 41);
+});
+
 /* ================= translation pure core ================= */
 
 test('withLangUrl: appends ?lang=ko only for ko, preserving existing query', () => {
@@ -416,4 +559,41 @@ test('translateUiStateFor: state → control mapping', () => {
   assert.equal(translateUiStateFor('error'), 'button');
   assert.equal(translateUiStateFor('canceled'), 'button');
   assert.equal(translateUiStateFor(undefined), 'button');
+});
+
+/* ================= two-step delete confirm (armTransition) ================= */
+
+test('armTransition: first click arms, second click on the same key confirms', () => {
+  const btn = { id: 'ji-del' };
+  // 첫 클릭 — 무장만 하고 아무것도 회수하지 않는다
+  assert.deepEqual(armTransition([], 'job-1', btn), { confirm: false, clearKeys: [] });
+  // 같은 키 재클릭 — 확인(실삭제) + 해당 키 회수
+  assert.deepEqual(armTransition([['job-1', btn]], 'job-1', btn), { confirm: true, clearKeys: ['job-1'] });
+});
+
+test('armTransition: key-based arming survives a list re-render (button replaced)', () => {
+  const oldBtn = { id: 'old' };
+  const newBtn = { id: 'new' };
+  // 5초 주기 renderJobList가 버튼을 새로 만들어도 키가 같으면 confirm이다
+  // (armed 항목의 entry.btn은 재렌더 시 최신 버튼으로 교체된다)
+  assert.equal(armTransition([['job-1', newBtn]], 'job-1', newBtn).confirm, true);
+  assert.equal(armTransition([['job-1', oldBtn]], 'job-1', newBtn).confirm, true);
+});
+
+test('armTransition: header click after job switch clears the stale arm instead of deleting', () => {
+  const hdr = { id: 'job-delete' };
+  // 잡 A에서 무장된 헤더 버튼으로 잡 B를 클릭 → 오삭제 없이 옛 무장 회수 + 재무장
+  assert.deepEqual(armTransition([['header:A', hdr]], 'header:B', hdr),
+    { confirm: false, clearKeys: ['header:A'] });
+});
+
+test('armTransition: arms on different buttons stay independent', () => {
+  const hdr = { id: 'job-delete' };
+  const item = { id: 'ji-del' };
+  // 목록 항목이 무장돼 있어도 헤더 버튼 클릭은 confirm도 회수도 아니다
+  assert.deepEqual(armTransition([['job-1', item]], 'header:job-1', hdr),
+    { confirm: false, clearKeys: [] });
+  // 반대 방향도 동일
+  assert.deepEqual(armTransition([['header:job-1', hdr]], 'job-1', item),
+    { confirm: false, clearKeys: [] });
 });

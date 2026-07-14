@@ -249,6 +249,58 @@ export function structurePreview(raw, final) {
   return parts.join('\n\n');
 }
 
+// ── 라이브 프리뷰 증분 분할 (순수 — frontend/tests/에서 직접 검증) ──────────
+// raw를 <PAGE> 마커 기준으로 "확정 페이지(뒤에 새 페이지가 시작된 세그먼트)"와
+// "미확정 꼬리"로 나눈다. 마커가 조각나 도착하면(<PA + GE>) 완성되기 전까지
+// 꼬리에 남는다. raw는 잡 안에서 append-only라 확정 세그먼트는 불변 → 캐시 가능.
+export function splitPreviewPages(raw) {
+  const pages = [];
+  let pos = 0;
+  let idx;
+  while ((idx = raw.indexOf(PAGE_MARKER, pos)) !== -1) {
+    pages.push(raw.slice(pos, idx));
+    pos = idx + PAGE_MARKER.length;
+  }
+  return { pages, tail: raw.slice(pos) };
+}
+
+// 이번 사이클에 렌더해야 할 조각 계산: 캐시에 없는 확정 페이지들의 markdown과
+// 꼬리 markdown. sep은 "앞에 렌더된 내용이 있으면 페이지 경계 hr을 붙여라" —
+// 전체 텍스트 structurePreview의 pushSep(선두/중복 hr 억제)과 동치다.
+// cachedHtmls: 확정 페이지별 렌더 HTML 캐시 (빈 문자열 = 내용 없는 페이지).
+export function planPreviewRender(raw, cachedHtmls, lastTailMd, lastTailSep) {
+  const { pages, tail } = splitPreviewPages(raw);
+  let hasBefore = cachedHtmls.some((html) => !!html);
+  const newPages = [];
+  for (let i = cachedHtmls.length; i < pages.length; i += 1) {
+    const md = structurePreview(pages[i], true); // 확정 세그먼트는 완결 — 홀드백 불필요
+    newPages.push({ idx: i, md, sep: !!md && hasBefore });
+    if (md) hasBefore = true;
+  }
+  const tailMd = structurePreview(tail, false);
+  const tailSep = !!tailMd && hasBefore;
+  // 꼬리 md가 같아도 sep이 바뀌면(앞에 내용 있는 페이지가 확정) 재렌더 대상
+  const tailChanged = tailMd !== lastTailMd || tailSep !== !!lastTailSep;
+  return { newPages, tailMd, tailSep, tailChanged };
+}
+
+// ── SSE 폴링 강등 → 재승격 백오프 (순수 — frontend/tests/에서 직접 검증) ──────
+// 강등 후 attempt번째(0부터) 재시도까지 기다릴 지연: 10초 → 20초 → 30초 상한.
+export function ssePromoteDelay(attempt) {
+  return Math.min(30000, 10000 * ((Number(attempt) || 0) + 1));
+}
+
+// raw pane 디바이더 번호(streamPageNo)를 ground 상태머신의 페이지로 재동기화.
+// 디바이더 k는 "페이지 k"이고 마커 k가 페이지 k를 시작하므로, streamPageNo는
+// "다음 마커가 시작할 페이지 - 1"이어야 한다: 선언 대기 중(expectAnnounce)이면
+// 다음 마커는 g.page의 시작 확인이라 g.page-1, 아니면 g.page+1을 시작하라 g.page.
+// 재연결 갭으로 마커가 유실돼도 ground.page는 progress 선언(폴링 포함)으로
+// 따라가므로 이 보정으로 이후 디바이더 번호가 복구된다. 절대 뒤로 가지 않는다.
+export function syncedStreamPageNo(streamPageNo, g) {
+  const target = g.expectAnnounce ? g.page - 1 : g.page;
+  return Math.max(Number(streamPageNo) || 0, target);
+}
+
 /* ============================ UI constants ============================ */
 
 const PHASE_LABELS = { render: '렌더링', ocr: 'OCR', merge: '병합' };
@@ -310,6 +362,11 @@ const state = {
   previewTimer: 0,
   previewInFlight: false,
   previewFails: 0,
+  previewStopped: false,   // 413/연속 실패로 라이브 프리뷰 중단됨
+  previewPageCache: [],    // 확정 페이지 렌더 HTML 캐시 (인덱스 = 확정 페이지 순번)
+  previewTailNodes: [],    // 현재 꼬리 렌더가 소유한 DOM 노드들 (선행 hr 포함)
+  previewTailMd: '',       // 마지막으로 렌더된 꼬리 markdown
+  previewTailSep: false,   // 마지막 꼬리 렌더의 선행 hr 유무
   previewAutoScroll: true,
   // cancel
   cancelRequestedFor: null,
@@ -318,6 +375,8 @@ const state = {
   sseErrorCount: 0,
   fallbackActive: false,
   fallbackTimer: 0,
+  ssePromoteTimer: 0,     // 폴링 강등 후 SSE 재승격 재시도 타이머
+  ssePromoteAttempts: 0,  // 재승격 백오프 단계 — 성공(open)·teardown 시 0으로
   // result tab caches
   previewLoaded: false,
   docLayoutLoaded: false,
@@ -336,6 +395,9 @@ const state = {
   toastTimer: 0,
 };
 
+// 2단계 삭제 확인의 무장(armed) 상태: key → { t: 만료 타이머, btn: 현재 버튼 }.
+// key는 목록 항목이면 잡 id, 헤더 버튼이면 'header:<잡 id>' — DOM 버튼이 아니라
+// 키로 관리해 5초 주기 재렌더(renderJobList)에도 무장이 유지된다.
 const armTimers = new Map();
 
 /* ============================ DOM refs ============================ */
@@ -654,8 +716,17 @@ function jobListItem(job) {
   const del = h('button', { class: 'ji-del icon-btn-sm', type: 'button', 'aria-label': '삭제', title: '삭제', html: ICON.x });
   del.addEventListener('click', (ev) => {
     ev.stopPropagation();
-    armDelete(del, () => deleteJob(job.job_id));
+    armDelete(del, job.job_id, () => deleteJob(job.job_id));
   });
+  // 재렌더가 무장(armed) 상태를 파괴하지 않도록 살아있는 무장을 새 버튼에 복원.
+  // 만료 타이머가 최신 버튼을 해제하도록 참조도 교체한다.
+  const arm = armTimers.get(job.job_id);
+  if (arm) {
+    arm.btn = del;
+    del.dataset.baseTitle = del.title;
+    del.classList.add('armed');
+    del.title = '한 번 더 클릭하면 삭제됩니다';
+  }
 
   const li = h('li', { class: `job-item${active ? ' active' : ''}`, role: 'button', tabindex: '0' }, main, del);
   li.addEventListener('click', () => openJob(job.job_id));
@@ -665,24 +736,48 @@ function jobListItem(job) {
   return li;
 }
 
-function armDelete(btn, onConfirm) {
-  if (btn.classList.contains('armed')) {
-    clearTimeout(armTimers.get(btn));
-    armTimers.delete(btn);
-    btn.classList.remove('armed');
-    btn.title = btn.dataset.baseTitle || '삭제';
+// 2단계 삭제 확인의 클릭 전이 (순수 — 테스트 대상). entries는 [key, owner] 쌍의
+// 이터러블(owner = 물리 버튼), key는 이번 클릭의 키, owner는 클릭된 버튼.
+// 클릭된 key가 이미 무장돼 있으면 confirm(실삭제), 아니면 같은 owner에 남은
+// 옛 무장(잡 전환 뒤의 헤더 버튼 등)을 회수(clearKeys)하고 새로 무장한다.
+export function armTransition(entries, key, owner) {
+  const clearKeys = [];
+  let confirm = false;
+  for (const [k, o] of entries) {
+    if (k === key) confirm = true;
+    else if (o === owner) clearKeys.push(k);
+  }
+  if (confirm) clearKeys.push(key);
+  return { confirm, clearKeys };
+}
+
+function disarmDeleteBtn(btn) {
+  btn.classList.remove('armed');
+  btn.title = btn.dataset.baseTitle || '삭제';
+}
+
+function armDelete(btn, key, onConfirm) {
+  const { confirm, clearKeys } = armTransition(
+    Array.from(armTimers, ([k, e]) => [k, e.btn]), key, btn);
+  for (const k of clearKeys) {
+    const e = armTimers.get(k);
+    if (e) clearTimeout(e.t);
+    armTimers.delete(k);
+  }
+  if (confirm) {
+    disarmDeleteBtn(btn);
     onConfirm();
     return;
   }
-  btn.dataset.baseTitle = btn.title || '삭제';
+  if (!btn.dataset.baseTitle) btn.dataset.baseTitle = btn.title || '삭제';
   btn.classList.add('armed');
   btn.title = '한 번 더 클릭하면 삭제됩니다';
   const t = setTimeout(() => {
-    btn.classList.remove('armed');
-    btn.title = btn.dataset.baseTitle || '삭제';
-    armTimers.delete(btn);
+    const e = armTimers.get(key);
+    armTimers.delete(key);
+    if (e) disarmDeleteBtn(e.btn); // 재렌더로 교체됐어도 최신 버튼을 해제
   }, 2600);
-  armTimers.set(btn, t);
+  armTimers.set(key, { t, btn });
 }
 
 function removeJobFromList(id) {
@@ -741,6 +836,15 @@ async function openJob(id) {
 
   teardownConnections();
   state.currentJobId = id;
+  // 잡 전환 시 이전 잡의 헤더 삭제 무장 잔상 제거 — 기능상 armTransition이 키
+  // 불일치로 confirm을 거부하지만, armed 시각 표시가 남으면 거짓 안내가 된다.
+  for (const [k, e] of armTimers) {
+    if (k.startsWith('header:') && k !== `header:${id}`) {
+      clearTimeout(e.t);
+      armTimers.delete(k);
+      disarmDeleteBtn(e.btn);
+    }
+  }
   state.displayedStatus = null;
   state.previewLoaded = false;
   state.markdownLoaded = false;
@@ -905,6 +1009,11 @@ function resetLiveState() {
   state.previewTimer = 0;
   state.previewDirty = false;
   state.previewFails = 0;
+  state.previewStopped = false;
+  state.previewPageCache = [];
+  state.previewTailNodes = [];
+  state.previewTailMd = '';
+  state.previewTailSep = false;
   state.previewAutoScroll = true;
   state.streamPending = '';
   state.streamPageNo = 0;
@@ -949,6 +1058,9 @@ function scheduleFlush() {
     state.rafId = 0;
     flushStream(false);
     drainGroundToUI(false);
+    // pane이 방금 pending 마커를 전부 소화한 시점 — 재연결 갭 등으로 마커가
+    // 유실됐다면 ground 페이지 기준으로 다음 디바이더 번호를 재동기화한다.
+    state.streamPageNo = syncedStreamPageNo(state.streamPageNo, state.ground);
     schedulePreviewRender();
   });
 }
@@ -1123,49 +1235,139 @@ function retryPageImageIfNeeded() {
 /* ============================ Live rendered preview (right pane) ============================ */
 
 function schedulePreviewRender() {
+  if (state.previewStopped) return;
   state.previewDirty = true;
   if (state.previewTimer || state.previewInFlight) return;
   state.previewTimer = setTimeout(runPreviewRender, 600);
 }
 
 function maybeReschedulePreview() {
-  if (state.previewDirty && state.currentJobId && !state.previewTimer && !state.previewInFlight) {
+  if (state.previewDirty && state.currentJobId && !state.previewStopped &&
+      !state.previewTimer && !state.previewInFlight) {
     state.previewTimer = setTimeout(runPreviewRender, state.previewFails >= 4 ? 3000 : 600);
   }
 }
 
-// Throttled, latest-wins (queue of 1): at most one POST in flight; tokens
+// POST 한 번 — 성공 시 {html}, HTTP 실패 시 {status}, 네트워크 오류 시 {status: 0}.
+async function postPreviewRender(id, body) {
+  try {
+    const res = await fetch(`/api/jobs/${id}/render-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body,
+    });
+    if (res.ok) return { html: await res.text() };
+    return { status: res.status };
+  } catch (_) {
+    return { status: 0 }; // network error → retried on the next schedule
+  }
+}
+
+// Trusted server-rendered fragment(/html과 동일 렌더러)를 pane 끝에 붙이고
+// 붙인 노드 목록을 돌려준다. withSep이면 페이지 경계 hr을 그룹 선두에 포함.
+// 타이포셋은 새로 붙인 노드로만 제한 — 기존 확정 노드는 재타이포셋하지 않는다.
+function appendPreviewFragment(html, withSep) {
+  const nodes = [];
+  if (withSep) nodes.push(h('hr'));
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  nodes.push(...tpl.content.childNodes);
+  for (const n of nodes) {
+    el.livePreview.appendChild(n);
+    if (n.nodeType === 1) typesetMath(n);
+  }
+  return nodes;
+}
+
+// 413(서버 2MB 상한) 또는 연속 실패 시 라이브 프리뷰를 중단하고 원인에 맞는
+// 한 줄 안내를 남긴다(일시 장애 중단에 '문서가 커서'라고 표시하지 않도록).
+// 잡 완료 후 결과 탭(/html) 렌더는 이와 무관하게 기존 경로로 동작한다.
+function stopLivePreview(message) {
+  state.previewStopped = true;
+  state.previewDirty = false;
+  clearTimeout(state.previewTimer);
+  state.previewTimer = 0;
+  el.livePreview.appendChild(h('div', {
+    class: 'lp-note',
+    text: message || '라이브 미리보기를 중단했습니다 — 완료 후 결과 탭에서 확인하세요',
+  }));
+}
+
+// Throttled, latest-wins (queue of 1): at most one cycle in flight; tokens
 // arriving mid-flight mark it dirty and exactly one follow-up is scheduled.
+// 증분 렌더: 확정 페이지는 최초 1회만 POST해 HTML을 캐시하고, 이후에는
+// 미확정 꼬리만 재전송한다 — 누적 전체 재전송(O(n²)·2MB 413 루프)을 피한다.
 async function runPreviewRender() {
   state.previewTimer = 0;
-  if (state.previewInFlight || !state.previewDirty) return;
+  if (state.previewInFlight || !state.previewDirty || state.previewStopped) return;
   const id = state.currentJobId;
   if (!id) { state.previewDirty = false; return; }
   const gen = state.liveGen;
   state.previewDirty = false;
 
-  const structured = structurePreview(state.rawText, false);
-  if (!structured.trim()) { maybeReschedulePreview(); return; }
+  const plan = planPreviewRender(
+    state.rawText, state.previewPageCache, state.previewTailMd, state.previewTailSep);
+  if (!plan.newPages.length && !plan.tailChanged) { maybeReschedulePreview(); return; }
 
   state.previewInFlight = true;
-  let html = null;
-  try {
-    const res = await fetch(`/api/jobs/${id}/render-preview`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-      body: structured,
-    });
-    if (res.ok) html = await res.text();
-  } catch (_) { /* network error → retried on the next schedule */ }
-  state.previewInFlight = false;
-  state.previewFails = html == null ? state.previewFails + 1 : 0;
-
-  if (html != null && state.currentJobId === id && state.liveGen === gen) {
-    // Trusted server-rendered fragment (same renderer as /html).
-    el.livePreview.innerHTML = html;
-    typesetMath(el.livePreview);
-    if (state.previewAutoScroll) el.livePreview.scrollTop = el.livePreview.scrollHeight;
+  let failStatus = -1; // -1 = 실패 없음
+  const pageHtmls = [];
+  for (const p of plan.newPages) {
+    if (!p.md) { pageHtmls.push(''); continue; }
+    const r = await postPreviewRender(id, p.md);
+    if (state.currentJobId !== id || state.liveGen !== gen) { // 잡 전환 가드
+      state.previewInFlight = false;
+      maybeReschedulePreview();
+      return;
+    }
+    if (r.html == null) { failStatus = r.status; break; }
+    pageHtmls.push(r.html);
   }
+  let tailHtml = '';
+  if (failStatus < 0 && plan.tailChanged && plan.tailMd) {
+    const r = await postPreviewRender(id, plan.tailMd);
+    if (state.currentJobId !== id || state.liveGen !== gen) { // 잡 전환 가드
+      state.previewInFlight = false;
+      maybeReschedulePreview();
+      return;
+    }
+    if (r.html == null) failStatus = r.status;
+    else tailHtml = r.html;
+  }
+  state.previewInFlight = false;
+
+  if (failStatus >= 0) {
+    state.previewFails += 1;
+    state.previewDirty = true; // 전송하지 못한 조각은 다음 사이클에 재시도
+    if (failStatus === 413) {
+      stopLivePreview('문서가 커서 라이브 미리보기를 중단했습니다 — 완료 후 결과 탭에서 확인하세요');
+    } else if (state.previewFails >= 5) {
+      stopLivePreview('라이브 미리보기 렌더가 계속 실패해 중단했습니다 — 완료 후 결과 탭에서 확인하세요');
+    } else {
+      maybeReschedulePreview();
+    }
+    return;
+  }
+  state.previewFails = 0;
+
+  // DOM 증분 적용: 확정 페이지 노드는 유지하고 꼬리 노드만 이동/교체한다.
+  const oldTail = state.previewTailNodes;
+  for (const n of oldTail) n.remove();
+  state.previewTailNodes = [];
+  plan.newPages.forEach((p, i) => {
+    state.previewPageCache.push(pageHtmls[i]); // p.idx === 캐시 길이 (순서 보장)
+    if (pageHtmls[i]) appendPreviewFragment(pageHtmls[i], p.sep);
+  });
+  if (plan.tailChanged) {
+    state.previewTailMd = plan.tailMd;
+    state.previewTailSep = plan.tailSep;
+    if (tailHtml) state.previewTailNodes = appendPreviewFragment(tailHtml, plan.tailSep);
+  } else {
+    // 꼬리 내용은 그대로인데 앞에 확정 페이지가 생긴 경우 — 같은 노드를 재부착
+    for (const n of oldTail) el.livePreview.appendChild(n);
+    state.previewTailNodes = oldTail;
+  }
+  if (state.previewAutoScroll) el.livePreview.scrollTop = el.livePreview.scrollHeight;
   maybeReschedulePreview();
 }
 
@@ -1180,7 +1382,11 @@ function onPreviewScroll() {
 // 보이는 그레이스풀 폴백.
 function typesetMath(root) {
   if (!window.katex || !root) return;
-  root.querySelectorAll('.math-inline, .math-display').forEach((elm) => {
+  // root 자신이 수식 블록일 수 있다 (증분 프리뷰는 최상위 노드 단위로 붙인다)
+  const targets = root.matches && root.matches('.math-inline, .math-display')
+    ? [root, ...root.querySelectorAll('.math-inline, .math-display')]
+    : root.querySelectorAll('.math-inline, .math-display');
+  targets.forEach((elm) => {
     if (elm.dataset.mathDone) return;
     const tex = elm.textContent;
     try {
@@ -1249,6 +1455,7 @@ function parseEventData(e) {
 function teardownConnections() {
   if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; }
   if (state.fallbackTimer) { clearInterval(state.fallbackTimer); state.fallbackTimer = 0; }
+  clearSsePromote(); // 잡 전환·삭제·터미널 상태에서 재승격 재시도도 함께 정리
   if (state.rafId) { cancelAnimationFrame(state.rafId); state.rafId = 0; }
   clearTimeout(state.previewTimer);
   state.previewTimer = 0;
@@ -1258,9 +1465,10 @@ function teardownConnections() {
   teardownTranslate(); // 잡 전환·삭제·페이지 이탈 시 번역 구독도 함께 정리
 }
 
+// 최초 구독(selectJob 경로)과 폴링 강등 후 재승격 시도가 공유하는 진입점.
+// 재승격 중에는 fallbackActive를 건드리지 않는다 — open 성공까지 폴링 유지.
 function startStream(id) {
   state.sseErrorCount = 0;
-  state.fallbackActive = false;
 
   if (typeof EventSource === 'undefined') {
     appendSystemLine('이 브라우저는 실시간 스트림을 지원하지 않아 상태 폴링을 사용합니다.', 'warn');
@@ -1272,7 +1480,8 @@ function startStream(id) {
   try {
     es = new EventSource(`/api/jobs/${id}/events`);
   } catch (_) {
-    startFallbackPolling(id);
+    if (!state.fallbackActive) startFallbackPolling(id);
+    scheduleSsePromote(id); // 강등은 임시 — 백오프 후 다시 시도
     return;
   }
   state.es = es;
@@ -1280,9 +1489,18 @@ function startStream(id) {
   es.addEventListener('open', () => {
     if (state.currentJobId !== id) return;
     state.sseErrorCount = 0;
+    clearSsePromote(); // 재승격 성공 — 백오프 단계 리셋
+    if (state.fallbackActive) stopFallbackPolling(); // 폴링 해제, 정상 복귀
     if (!state.streamConnected) {
       state.streamConnected = true;
       appendSystemLine('실시간 스트림에 연결되었습니다.');
+    } else {
+      // 재연결 — 서버는 백로그를 리플레이하지 않으므로 끊긴 동안 토큰이 유실된다.
+      // 갭에 <PAGE> 마커가 있었을 수 있으니 디바이더 번호를 ground 페이지로 보정.
+      flushStream(false);
+      drainGroundToUI(false);
+      state.streamPageNo = syncedStreamPageNo(state.streamPageNo, state.ground);
+      appendSystemLine('스트림 재연결됨 — 끊긴 동안의 출력 일부가 누락될 수 있습니다.', 'warn');
     }
   });
 
@@ -1312,13 +1530,45 @@ function startStream(id) {
 }
 
 function handleSseConnError(id) {
-  if (state.currentJobId !== id || state.fallbackActive) return;
+  if (state.currentJobId !== id) return;
+  if (state.fallbackActive) {
+    // 폴링 중의 재승격 시도가 실패 — es를 닫고(브라우저 자동 재시도 차단)
+    // 다음 백오프 단계로 재시도만 예약한다. 폴링은 그대로 유지된다.
+    if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; }
+    scheduleSsePromote(id);
+    return;
+  }
   state.sseErrorCount += 1;
   if (state.sseErrorCount >= 2) {
     if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; }
-    appendSystemLine('라이브 스트림을 사용할 수 없어 상태 폴링으로 전환했습니다.', 'warn');
+    appendSystemLine('라이브 스트림을 사용할 수 없어 상태 폴링으로 전환했습니다 — 주기적으로 재연결을 시도합니다.', 'warn');
     startFallbackPolling(id);
+    scheduleSsePromote(id); // 강등은 임시 — 백오프 후 SSE 재승격 시도
   }
+}
+
+// 폴링 강등 후 SSE 재승격 시도를 백오프(10s→20s→30s 상한)로 예약한다.
+// 타이머는 teardownConnections / 터미널 폴링 / open 성공에서 정리된다.
+function scheduleSsePromote(id) {
+  if (state.ssePromoteTimer) clearTimeout(state.ssePromoteTimer);
+  const delay = ssePromoteDelay(state.ssePromoteAttempts);
+  state.ssePromoteAttempts += 1;
+  state.ssePromoteTimer = setTimeout(() => {
+    state.ssePromoteTimer = 0;
+    // 잡 전환·터미널(폴링 해제)·이미 복귀한 경우에는 시도하지 않는다
+    if (state.currentJobId !== id || !state.fallbackActive) return;
+    startStream(id);
+  }, delay);
+}
+
+function clearSsePromote() {
+  if (state.ssePromoteTimer) { clearTimeout(state.ssePromoteTimer); state.ssePromoteTimer = 0; }
+  state.ssePromoteAttempts = 0;
+}
+
+function stopFallbackPolling() {
+  if (state.fallbackTimer) { clearInterval(state.fallbackTimer); state.fallbackTimer = 0; }
+  state.fallbackActive = false;
 }
 
 function startFallbackPolling(id) {
@@ -1333,6 +1583,8 @@ function startFallbackPolling(id) {
       if (e.status === 404) {
         clearInterval(state.fallbackTimer);
         state.fallbackTimer = 0;
+        clearSsePromote();
+        if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; } // 재승격 시도 중이던 es
         removeJobFromList(id);
         if (state.currentJobId === id) { state.currentJobId = null; showEmptyState(); }
       }
@@ -1343,6 +1595,8 @@ function startFallbackPolling(id) {
       clearInterval(state.fallbackTimer);
       state.fallbackTimer = 0;
       state.fallbackActive = false;
+      clearSsePromote(); // 터미널 — 재승격 재시도도 정리
+      if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; } // 재승격 시도 중이던 es
       flushStream(true);
       drainGroundToUI(true);
       renderJob(job);
@@ -2136,7 +2390,8 @@ function init() {
   el.jobStop.addEventListener('click', requestCancel);
   el.jobDelete.addEventListener('click', () => {
     if (!state.currentJobId) return;
-    armDelete(el.jobDelete, () => deleteJob(state.currentJobId));
+    // 키에 잡 id 포함 — 잡 전환 뒤 남은 무장이 다른 잡을 삭제하지 못하게 한다.
+    armDelete(el.jobDelete, `header:${state.currentJobId}`, () => deleteJob(state.currentJobId));
   });
 
   // 번역 컨트롤
