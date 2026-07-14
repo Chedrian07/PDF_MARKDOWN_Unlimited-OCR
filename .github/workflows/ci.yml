@@ -1,0 +1,68 @@
+# CI — 3계층 테스트(backend pytest·native 패리티·frontend node --test) + ruff 린트.
+# 실모델은 실행하지 않음: backend 테스트는 FakeEngine 기반, torch는 CPU 휠(uv 캐시 활용).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install (torch CPU 휠)
+        run: uv sync --extra cpu
+      - name: pytest
+        run: uv run pytest
+
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      # dev 그룹만 설치(--only-group) — ruff에 base 의존성(transformers 등)은 불필요.
+      - name: ruff check
+        run: uv run --only-group dev ruff check .
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 22
+      # 의존성 설치 불필요 — 빌드 스텝/외부 의존성 없는 정적 프론트엔드.
+      - name: node --test
+        run: npm test --prefix frontend
+
+  native:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.3.2
+      # native/README.md의 단독 테스트 절차 그대로. 빌드 체인(scikit-build-core·
+      # pybind11·ninja)은 PEP 517 격리 빌드로 자동 해결, cmake·C++17은 러너 기본 제공.
+      - name: Build (pybind11 C++)
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install -p .venv/bin/python -e . pytest numpy
+      - name: pytest (parity)
+        run: .venv/bin/python -m pytest tests/ -v

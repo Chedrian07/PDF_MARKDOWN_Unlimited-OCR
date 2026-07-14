@@ -282,8 +282,6 @@ def _drive_decode(model, seq, pos_mode, rope_calls=None):
     'fresh'  = 매 스텝 새 position_ids 텐서 (eager 계약)
     'static' = 단일 [1,1] 버퍼를 in-place add_ (그래프 캡처 계약 — id 불변)
     반환: 스텝별 last_hidden_state 목록, 최종 cache."""
-    from transformers.cache_utils import DynamicCache
-
     cache = DynamicCache()
     with torch.no_grad():
         out = model(input_ids=seq[:, :4], use_cache=True, past_key_values=cache)

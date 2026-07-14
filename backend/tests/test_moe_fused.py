@@ -16,8 +16,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from app.vendor.unlimited_ocr.configuration_deepseek_v2 import DeepseekV2Config
-from app.vendor.unlimited_ocr.modeling_deepseekv2 import DeepseekV2MoE
+from app.vendor.unlimited_ocr.configuration_deepseek_v2 import DeepseekV2Config  # noqa: E402
+from app.vendor.unlimited_ocr.modeling_deepseekv2 import DeepseekV2MoE  # noqa: E402
 
 HIDDEN = 32
 

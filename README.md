@@ -1,5 +1,7 @@
 # Unlimited-OCR — PDF → Markdown
 
+[![CI](https://github.com/Chedrian07/PDF_MARKDOWN_Unlimited-OCR/actions/workflows/ci.yml/badge.svg)](https://github.com/Chedrian07/PDF_MARKDOWN_Unlimited-OCR/actions/workflows/ci.yml) — push/PR마다 backend pytest·ruff·frontend·native 패리티 테스트를 실행합니다.
+
 웹에서 PDF를 업로드하면 [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR)
 (3.3B MoE 비전-언어 모델, MIT)로 **이미지(figure)까지 추출된 Markdown**을 만들어 주는
 셀프호스팅 서비스입니다.
