@@ -212,20 +212,20 @@ def execute_job(
                 run: Callable[[], str],
                 context: str,
                 *,
-                retry_repetitive: bool = True,
                 reset_output: Callable[[], None] | None = None,
             ) -> str:
-                """엔진 호출을 1회 재시도하되 multi 의미 반복은 호출자에게 넘긴다."""
+                """엔진 호출을 1회 재시도하되 의미 반복은 즉시 호출자에게 넘긴다.
+
+                반복 감지는 재시도해도 같은 내용에서 재발하므로 재시도 대상이
+                아니다 — 복구(per_page 강등·텍스트 레이어 폴백)는 호출자 몫."""
                 try:
                     return run()
                 except JobCanceled:
                     raise
-                except RepetitiveOutputError as error:
+                except RepetitiveOutputError:
                     if cancel.is_set():
                         raise JobCanceled() from None
-                    if not retry_repetitive:
-                        raise
-                    first_error = error
+                    raise
                 except Exception as error:  # noqa: BLE001 — 청크 단위 격리
                     first_error = error
 
@@ -296,7 +296,6 @@ def execute_job(
                         page_md = _run_with_retry(
                             _run_page,
                             f"{global_page}페이지 fallback OCR",
-                            retry_repetitive=False,
                             reset_output=lambda directory=page_dir: shutil.rmtree(
                                 directory, ignore_errors=True
                             ),
@@ -328,7 +327,6 @@ def execute_job(
                 md = _run_with_retry(
                     _run_engine,
                     f"청크 {ci + 1}/{len(chunks)}",
-                    retry_repetitive=False,
                     reset_output=lambda: shutil.rmtree(work_dir, ignore_errors=True),
                 )
             except JobCanceled:
@@ -386,7 +384,10 @@ def execute_job(
                 raise JobCanceled()
 
             done_pages += len(chunk)
-            job.progress["current_page"] = done_pages
+            # 단조 가드 — 마커 과잉 생성으로 sink가 선행시킨 진행률을 되돌리지 않는다
+            job.progress["current_page"] = max(
+                job.progress.get("current_page", 0), done_pages
+            )
             store.save(job)
             broker.publish_progress(job)
 

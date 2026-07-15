@@ -53,6 +53,17 @@ def test_page_output_limits_from_env(monkeypatch):
     assert settings.max_page_output_tokens == 4_321
 
 
+def test_page_output_limits_zero_disables(monkeypatch):
+    """0 이하 상한은 비활성(None) — 감지기 ValueError로 잡이 죽는 설정 실수 방지."""
+    monkeypatch.setenv("MAX_PAGE_OUTPUT_CHARS", "0")
+    monkeypatch.setenv("MAX_PAGE_OUTPUT_TOKENS", "-1")
+
+    settings = Settings.from_env()
+
+    assert settings.max_page_output_chars is None
+    assert settings.max_page_output_tokens is None
+
+
 def test_resolve_dtype():
     torch = pytest.importorskip("torch")
     from app.engine.unlimited import _resolve_dtype

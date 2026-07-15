@@ -366,3 +366,47 @@ def test_streamer_counts_tokens_after_page_marker_reset(monkeypatch):
     streamer.put(torch.tensor([[10, 11]]))
     assert detector.page_index == 1 and detector.page_tokens == 2
     assert detector.detected is False
+
+
+# ── 병합 후 리뷰 반영 회귀 테스트 (page_flood·열거형 오탐) ──────────────
+
+
+def test_enumeration_form_does_not_false_positive_at_default_threshold():
+    """숫자만 다른 동일 행 40개(설문지·법령 서식류) — 리뷰에서 실증된 오탐 회귀 방지.
+
+    threshold 기본값을 24→64로 올린 근거: 합법 열거형 문서가 24행에서 걸려
+    per_page 강등→텍스트 레이어(구조 소실)/플레이스홀더(스캔 문서 전손)로
+    이어지는 품질 회귀가 실증됐다. 폭주 루프는 수백 회 반복하므로 64로도 잡힌다."""
+    detector = SemanticRepetitionDetector()
+    for index in range(1, 41):
+        assert detector.feed(f"{index}. 매우 그렇다 / 그렇다 / 보통이다 / 아니다\n") is False
+    assert detector.feed("", stream_end=True) is False
+
+
+def test_marker_flood_loop_is_detected_as_page_flood():
+    """<PAGE> 마커가 낀 루프는 마커마다 페이지 예산이 리셋되어 문자·토큰 예산을
+    전부 우회한다(리뷰 실증: 2,000회 반복에도 미감지) — 마커 수 자체를 예산에
+    포함해 기대 페이지 수를 크게 넘으면 중단한다."""
+    detector = SemanticRepetitionDetector(expected_pages=2)
+    unit = "<|ref|>text<|/ref|><|det|>[[1,2,3,4]]<|/det|># 3. LOOP BODY HERE\n<PAGE>"
+    tripped = False
+    for _ in range(50):
+        if detector.feed(unit):
+            tripped = True
+            break
+    assert tripped is True
+    assert detector.reason == "page_flood"
+    assert "기대 페이지 수(2)" in detector.message
+
+
+def test_expected_marker_count_with_slack_does_not_trip():
+    """정상 변이(마커 1~2개 초과)는 merge의 불일치 보정이 흡수하므로 트립 금지."""
+    detector = SemanticRepetitionDetector(expected_pages=2)
+    md = (
+        "<PAGE>\n1페이지 본문입니다. 내용이 이어집니다.\n"
+        "<PAGE>\n2페이지 본문입니다. 내용이 이어집니다.\n"
+        "<PAGE>\n모델이 가끔 내는 여분 마커 하나까지는 정상 변이로 본다.\n"
+    )
+    assert detector.feed(md) is False
+    assert detector.feed("", stream_end=True) is False
+    assert detector.reason is None

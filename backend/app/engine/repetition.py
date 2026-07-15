@@ -11,9 +11,17 @@ from __future__ import annotations
 
 import re
 
-SEMANTIC_REPEAT_THRESHOLD = 24
+# 행 템플릿 임계 — 숫자만 다른 동일 행이 이만큼 이어져야 루프로 판정한다.
+# 24는 합법 열거형 문서(설문지·법령 서식 등 '1. 매우 그렇다' 류 24행)가 걸리는
+# 오탐이 실증되어 64로 상향 — 폭주 루프는 수백 회 반복하므로 재현율 손실이 없고,
+# 한 페이지에 64행 이상 동일 템플릿은 사실상 병리적이다.
+SEMANTIC_REPEAT_THRESHOLD = 64
 MAX_PAGE_OUTPUT_CHARS = 16_384
 MAX_PAGE_OUTPUT_TOKENS = 6_144
+# 마커 폭주 여유 배수 — 기대 페이지 수의 이 배수(최소 +2)를 넘는 <PAGE> 마커는
+# 루프로 판정한다. 마커가 낀 반복 루프는 마커마다 페이지 예산이 리셋되어 다른
+# 채널을 전부 우회하므로 마커 수 자체를 예산에 포함해야 한다.
+_PAGE_FLOOD_FACTOR = 2
 
 _MIN_TEMPLATE_CHARS = 24
 _MIN_ALPHA_CHARS = 8
@@ -50,6 +58,7 @@ class SemanticRepetitionDetector:
         *,
         max_page_chars: int | None = MAX_PAGE_OUTPUT_CHARS,
         max_page_tokens: int | None = MAX_PAGE_OUTPUT_TOKENS,
+        expected_pages: int | None = None,
     ) -> None:
         if threshold < 2:
             raise ValueError("threshold는 2 이상이어야 합니다")
@@ -57,9 +66,19 @@ class SemanticRepetitionDetector:
             raise ValueError("max_page_chars는 1 이상이어야 합니다")
         if max_page_tokens is not None and max_page_tokens < 1:
             raise ValueError("max_page_tokens는 1 이상이어야 합니다")
+        if expected_pages is not None and expected_pages < 1:
+            raise ValueError("expected_pages는 1 이상이어야 합니다")
         self.threshold = threshold
         self.max_page_chars = max_page_chars
         self.max_page_tokens = max_page_tokens
+        self.expected_pages = expected_pages
+        # 마커 폭주 상한 — 정상 변이(마커 1~2개 초과 생성)는 merge의 불일치 보정이
+        # 흡수하므로 여유를 두고, 그 이상은 마커가 낀 루프로 판정한다.
+        self._max_markers = (
+            None
+            if expected_pages is None
+            else max(expected_pages + 2, expected_pages * _PAGE_FLOOD_FACTOR)
+        )
         self.detected = False
         self.reason: str | None = None
         self.repeat_count = 0
@@ -298,6 +317,16 @@ class SemanticRepetitionDetector:
         if self._saw_page_marker:
             self.page_index += 1
         self._saw_page_marker = True
+        # 마커 폭주 검사 — 마커가 낀 루프는 페이지 예산이 마커마다 리셋되어 아래
+        # 채널을 전부 우회하므로, 마커 수 자체가 기대치를 크게 넘으면 중단한다.
+        if self._max_markers is not None and self.page_index + 1 > self._max_markers:
+            self.reason = "page_flood"
+            self.detected = True
+            self._message = (
+                f"<PAGE> 마커가 기대 페이지 수({self.expected_pages})를 크게 초과해 "
+                f"{self.page_index + 1}개째 생성되어 중단했습니다"
+            )
+            return
         self.page_chars = 0
         self.page_tokens = 0
         self._pending_line = ""

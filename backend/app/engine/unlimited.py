@@ -255,6 +255,7 @@ class UnlimitedEngine(OCREngine):
         repetition = SemanticRepetitionDetector(
             max_page_chars=s.max_page_output_chars,
             max_page_tokens=s.max_page_output_tokens,
+            expected_pages=len(image_paths),
         )
         try:
             try:
@@ -296,6 +297,7 @@ class UnlimitedEngine(OCREngine):
         repetition = SemanticRepetitionDetector(
             max_page_chars=s.max_page_output_chars,
             max_page_tokens=s.max_page_output_tokens,
+            expected_pages=1,
         )
         try:
             try:
