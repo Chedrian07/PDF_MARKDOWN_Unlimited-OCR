@@ -101,12 +101,30 @@ class LoopFallbackEngine(FakeEngine):
         return super().run_single(image_path, out_dir, sink, cancel)
 
 
-def _run_job(tmp_path, engine, pages=4, mode="multi", pages_per_chunk=2):
+def _run_job(
+    tmp_path,
+    engine,
+    pages=4,
+    mode="multi",
+    pages_per_chunk=2,
+    *,
+    embedded_text=True,
+):
     """execute_job을 워커 없이 직접 구동 (4페이지 × 청크 2 → 청크 2개 구성)."""
     store = JobStore(tmp_path / "jobs")
     broker = EventBroker()
     job = store.create("doc.pdf", mode, dpi=72)
-    (job.dir / "source.pdf").write_bytes(make_pdf_bytes(pages=pages, with_image=False))
+    if embedded_text:
+        pdf_bytes = make_pdf_bytes(pages=pages, with_image=False)
+    else:
+        import fitz
+
+        doc = fitz.open()
+        for _ in range(pages):
+            doc.new_page()
+        pdf_bytes = doc.tobytes()
+        doc.close()
+    (job.dir / "source.pdf").write_bytes(pdf_bytes)
     settings = Settings(
         engine="fake", device="cpu", data_dir=tmp_path / "data",
         preload_model=False, fake_delay=0.0, pages_per_chunk=pages_per_chunk,
@@ -169,16 +187,33 @@ def test_job_canceled_is_not_swallowed(tmp_path):
     assert engine.calls == 1  # 재시도 없이 즉시 취소 처리
 
 
-def test_per_page_mode_failed_page_placeholder(tmp_path):
-    """per_page 모드(single 청크)도 동일하게 격리된다 — 1페이지만 플레이스홀더."""
+def test_per_page_mode_failed_page_recovers_from_embedded_text(tmp_path):
+    """per_page single 최종 실패도 원본 PDF 텍스트 레이어로 복구한다."""
     engine = FlakyEngine(fail_calls={1, 2})
     job = _run_job(tmp_path, engine, pages=2, mode="per_page")
 
     assert job.status == "done"
     md = (job.dir / "result.md").read_text(encoding="utf-8")
-    assert md.count(FAILED_MARK) == 1
+    assert FAILED_MARK not in md
+    assert "PDF 내장 텍스트 레이어" in md and "Sample page 1" in md
     assert "![](images/p0002_0.jpg)" in md
-    assert len(job.warnings) == 1 and "1페이지" in job.warnings[0]
+    assert len(job.warnings) == 1 and "텍스트 레이어로 복구" in job.warnings[0]
+
+
+def test_per_page_mode_without_text_layer_still_uses_placeholder(tmp_path):
+    engine = FlakyEngine(fail_calls={1, 2})
+    job = _run_job(
+        tmp_path,
+        engine,
+        pages=2,
+        mode="per_page",
+        embedded_text=False,
+    )
+
+    assert job.status == "done"
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert md.count(FAILED_MARK) == 1
+    assert len(job.warnings) == 1 and "플레이스홀더" in job.warnings[0]
 
 
 def test_repetitive_multi_chunk_falls_back_to_single_pages(tmp_path):
@@ -193,25 +228,40 @@ def test_repetitive_multi_chunk_falls_back_to_single_pages(tmp_path):
     for page in range(1, 5):
         assert f"![](images/p{page:04d}_0.jpg)" in md
     assert not (job.dir / "images" / "p0001_99.jpg").exists()
-    assert any("반복 출력 감지로 페이지별 재처리" in warning for warning in job.warnings)
+    assert any("반복/출력 상한 감지로 페이지별 재처리" in warning for warning in job.warnings)
 
 
-def test_single_fallback_failure_only_replaces_that_page(tmp_path):
+def test_single_fallback_failure_recovers_only_that_page_from_pdf_text(tmp_path):
     engine = LoopFallbackEngine(fail_single_pages={2})
     job = _run_job(tmp_path, engine, pages=4, pages_per_chunk=2)
 
     assert job.status == "done"
     assert engine.single_calls == {1: 1, 2: 2}
     md = (job.dir / "result.md").read_text(encoding="utf-8")
-    assert md.count(FAILED_MARK) == 1
+    assert FAILED_MARK not in md
     assert "![](images/p0001_0.jpg)" in md
     assert "![](images/p0003_0.jpg)" in md
     assert "![](images/p0004_0.jpg)" in md
     assert "![](images/p0002_0.jpg)" not in md
+    assert "Sample page 2" in md and "PDF 내장 텍스트 레이어" in md
     assert not (job.dir / "images" / "p0002_99.jpg").exists()
     assert not (job.dir / "layout" / "page_0002.jpg").exists()
     layout = json.loads((job.dir / "layout.json").read_text(encoding="utf-8"))
     assert 2 not in {page["page"] for page in layout}
+
+
+def test_single_fallback_repetition_goes_directly_to_pdf_text_without_retry(tmp_path):
+    engine = LoopFallbackEngine(loop_single_pages={2})
+    job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=2)
+
+    assert job.status == "done"
+    assert engine.multi_calls == 1
+    assert engine.single_calls == {1: 1, 2: 1}
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert FAILED_MARK not in md
+    assert "Sample page 2" in md and "PDF 내장 텍스트 레이어" in md
+    assert not (job.dir / "images" / "p0002_99.jpg").exists()
+    assert any("RepetitiveOutputError" in warning for warning in job.warnings)
 
 
 def test_single_fallback_retry_discards_first_attempt_artifacts(tmp_path):
@@ -226,9 +276,28 @@ def test_single_fallback_retry_discards_first_attempt_artifacts(tmp_path):
     assert not (job.dir / "images" / "p0002_99.jpg").exists()
 
 
-def test_all_single_fallback_pages_failed_keeps_all_failed_contract(tmp_path):
+def test_all_single_fallback_pages_can_all_recover_from_pdf_text(tmp_path):
     engine = LoopFallbackEngine(fail_single_pages={1, 2})
     job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=2)
+
+    assert job.status == "done"
+    assert engine.multi_calls == 1
+    assert engine.single_calls == {1: 2, 2: 2}
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert FAILED_MARK not in md
+    assert md.count("PDF 내장 텍스트 레이어") == 2
+    assert "Sample page 1" in md and "Sample page 2" in md
+
+
+def test_all_single_fallback_pages_without_text_keep_all_failed_contract(tmp_path):
+    engine = LoopFallbackEngine(fail_single_pages={1, 2})
+    job = _run_job(
+        tmp_path,
+        engine,
+        pages=2,
+        pages_per_chunk=2,
+        embedded_text=False,
+    )
 
     assert job.status == "error"
     assert "모든 청크" in job.error
@@ -236,15 +305,18 @@ def test_all_single_fallback_pages_failed_keeps_all_failed_contract(tmp_path):
     assert engine.single_calls == {1: 2, 2: 2}
 
 
-def test_per_page_repetition_retries_without_recursive_fallback(tmp_path):
+def test_per_page_repetition_goes_directly_to_embedded_text_without_retry(tmp_path):
     engine = LoopFallbackEngine(loop_single_pages={1})
     job = _run_job(tmp_path, engine, pages=2, mode="per_page")
 
     assert job.status == "done"
     assert engine.multi_calls == 0
-    assert engine.single_calls == {1: 2, 2: 1}
+    assert engine.single_calls == {1: 1, 2: 1}
     md = (job.dir / "result.md").read_text(encoding="utf-8")
-    assert md.count(FAILED_MARK) == 1
+    assert FAILED_MARK not in md
+    assert "Sample page 1" in md and "PDF 내장 텍스트 레이어" in md
+    assert not (job.dir / "images" / "p0001_99.jpg").exists()
+    assert not (job.dir / "layout" / "page_0001.jpg").exists()
 
 
 def test_cancel_wins_over_multi_repetition_fallback(tmp_path):

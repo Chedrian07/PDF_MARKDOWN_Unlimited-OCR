@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Callable
 
 from ..engine.base import EngineError, JobCanceled, OCREngine, RepetitiveOutputError
 from .merge import ChunkResult, IncrementalMerger
-from .pdf import render_pdf_pages
+from .pdf import extract_embedded_page_markdown, render_pdf_pages
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..config import Settings
@@ -156,6 +156,39 @@ def execute_job(
         store.save(job)
 
         merger = IncrementalMerger(job.dir, settings.page_separator)
+
+        def _try_embedded_text_fallback(
+            page_number: int,
+            recovery_dir: Path,
+            error: Exception,
+        ) -> bool:
+            """single OCR 최종 실패 페이지를 원본 PDF 텍스트 레이어로 복구."""
+            if cancel.is_set():
+                raise JobCanceled()
+            # 실패한 single 호출이 만든 crop/layout/raw 산출물은 절대 병합하지 않는다.
+            shutil.rmtree(recovery_dir, ignore_errors=True)
+            page_md = extract_embedded_page_markdown(
+                job.dir / "source.pdf", page_number
+            )
+            if cancel.is_set():
+                raise JobCanceled()
+            if page_md is None:
+                return False
+            recovery_dir.mkdir(parents=True, exist_ok=True)
+            if cancel.is_set():
+                raise JobCanceled()
+            merger.add_chunk(
+                ChunkResult(recovery_dir, page_number, 1, page_md, single=True)
+            )
+            message = (
+                f"{page_number}페이지: single OCR 실패 후 PDF 내장 텍스트 레이어로 복구 "
+                f"(이미지·정밀 레이아웃 제외; {error.__class__.__name__}: "
+                f"{str(error)[:160]})"
+            )
+            merger.warnings.append(message)
+            logger.warning("%s", message)
+            return True
+
         done_pages = 0
         failed_chunks = 0
         last_chunk_error: Exception | None = None
@@ -222,10 +255,10 @@ def execute_job(
                     )
                     raise
 
-            def _recover_repetitive_chunk(
-                repetition_error: RepetitiveOutputError,
+            def _recover_unsafe_generation_chunk(
+                generation_error: RepetitiveOutputError,
             ) -> tuple[bool, Exception]:
-                """오염된 multi 산출물을 버리고 원본 페이지를 single로 격리 재처리."""
+                """반복/상한 초과 multi 산출물을 버리고 페이지별 single 재처리."""
                 if cancel.is_set():
                     raise JobCanceled()
                 end_page = start_page + len(chunk) - 1
@@ -235,19 +268,20 @@ def execute_job(
                     else f"{start_page}–{end_page}페이지"
                 )
                 logger.warning(
-                    "%s multi OCR 반복 출력 감지 — 페이지별 재처리: %s",
+                    "%s multi OCR 비정상 생성 감지 — 페이지별 재처리: %s",
                     span,
-                    str(repetition_error)[:200],
+                    str(generation_error)[:200],
                 )
                 merger.warnings.append(
-                    f"{span}: 반복 출력 감지로 페이지별 재처리 ({str(repetition_error)[:200]})"
+                    f"{span}: 반복/출력 상한 감지로 페이지별 재처리 "
+                    f"({str(generation_error)[:200]})"
                 )
 
                 # multi와 single은 이미지/레이아웃 파일명 규약이 다르다. 부분 multi
                 # 결과를 병합하지 않도록 제거하고 페이지마다 독립 디렉터리를 쓴다.
                 shutil.rmtree(work_dir, ignore_errors=True)
                 failed_pages = 0
-                last_error: Exception = repetition_error
+                last_error: Exception = generation_error
                 for local_page, image_path in enumerate(chunk):
                     if cancel.is_set():
                         raise JobCanceled()
@@ -262,6 +296,7 @@ def execute_job(
                         page_md = _run_with_retry(
                             _run_page,
                             f"{global_page}페이지 fallback OCR",
+                            retry_repetitive=False,
                             reset_output=lambda directory=page_dir: shutil.rmtree(
                                 directory, ignore_errors=True
                             ),
@@ -269,12 +304,14 @@ def execute_job(
                     except JobCanceled:
                         raise
                     except Exception as page_error:  # noqa: BLE001 — 페이지 단위 격리
-                        failed_pages += 1
                         last_error = page_error
-                        shutil.rmtree(page_dir, ignore_errors=True)
-                        _add_failed_chunk(
-                            merger, page_dir, global_page, 1, True, page_error
-                        )
+                        if not _try_embedded_text_fallback(
+                            global_page, page_dir, page_error
+                        ):
+                            failed_pages += 1
+                            _add_failed_chunk(
+                                merger, page_dir, global_page, 1, True, page_error
+                            )
                     else:
                         merger.add_chunk(
                             ChunkResult(page_dir, global_page, 1, page_md, single=True)
@@ -291,43 +328,51 @@ def execute_job(
                 md = _run_with_retry(
                     _run_engine,
                     f"청크 {ci + 1}/{len(chunks)}",
-                    retry_repetitive=job.mode == "per_page",
+                    retry_repetitive=False,
                     reset_output=lambda: shutil.rmtree(work_dir, ignore_errors=True),
                 )
             except JobCanceled:
                 raise
             except RepetitiveOutputError as repetition_error:
                 if job.mode != "per_page":
-                    all_failed, last_error = _recover_repetitive_chunk(repetition_error)
+                    all_failed, last_error = _recover_unsafe_generation_chunk(
+                        repetition_error
+                    )
                     if all_failed:
                         failed_chunks += 1
                         last_chunk_error = last_error
                 else:
+                    if not _try_embedded_text_fallback(
+                        start_page, work_dir, repetition_error
+                    ):
+                        failed_chunks += 1
+                        last_chunk_error = repetition_error
+                        _add_failed_chunk(
+                            merger, work_dir, start_page, len(chunk), True, repetition_error
+                        )
+            except Exception as chunk_error:  # noqa: BLE001 — 청크 단위 격리
+                recovered = job.mode == "per_page" and _try_embedded_text_fallback(
+                    start_page, work_dir, chunk_error
+                )
+                if not recovered:
+                    logger.warning(
+                        "청크 %d/%d 최종 실패 (%s: %s) — 플레이스홀더로 보정 후 계속",
+                        ci + 1,
+                        len(chunks),
+                        chunk_error.__class__.__name__,
+                        str(chunk_error)[:200],
+                    )
                     failed_chunks += 1
-                    last_chunk_error = repetition_error
+                    last_chunk_error = chunk_error
                     shutil.rmtree(work_dir, ignore_errors=True)
                     _add_failed_chunk(
-                        merger, work_dir, start_page, len(chunk), True, repetition_error
+                        merger,
+                        work_dir,
+                        start_page,
+                        len(chunk),
+                        job.mode == "per_page",
+                        chunk_error,
                     )
-            except Exception as chunk_error:  # noqa: BLE001 — 청크 단위 격리
-                logger.warning(
-                    "청크 %d/%d 최종 실패 (%s: %s) — 플레이스홀더로 보정 후 계속",
-                    ci + 1,
-                    len(chunks),
-                    chunk_error.__class__.__name__,
-                    str(chunk_error)[:200],
-                )
-                failed_chunks += 1
-                last_chunk_error = chunk_error
-                shutil.rmtree(work_dir, ignore_errors=True)
-                _add_failed_chunk(
-                    merger,
-                    work_dir,
-                    start_page,
-                    len(chunk),
-                    job.mode == "per_page",
-                    chunk_error,
-                )
             if md is not None:
                 # 병합은 엔진 성공 시 1회만 — 병합 실패는 잡 레벨 IO 오류로 취급한다.
                 merger.add_chunk(

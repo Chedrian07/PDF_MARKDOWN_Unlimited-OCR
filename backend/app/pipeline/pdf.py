@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Callable
@@ -22,6 +23,12 @@ MAX_PAGE_SIDE_PT = 5400
 # 거부가 아니라 비율 유지 축소로 처리한다. 그라운딩 좌표는 0–999 정규화라
 # 균일 축소에 영향 없다 (layout.py/_pct, pdf_fonts.py 참조).
 MAX_RENDER_PIXELS = 50_000_000
+
+# OCR fallback에서 한 페이지의 숨은/중복 텍스트 레이어가 결과 파일을 폭증시키지
+# 못하게 하는 독립 상한. 정상 논문/문서 페이지의 텍스트는 이보다 훨씬 작다.
+MAX_EMBEDDED_TEXT_CHARS = 100_000
+_UNSAFE_TEXT_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_EMBEDDED_RECOVERY_NOTE = "> ℹ️ PDF 내장 텍스트 레이어에서 복구한 plain text입니다."
 
 
 def quiet_fitz():
@@ -92,6 +99,48 @@ def probe_pdf(pdf_path: Path, max_pages: int) -> int:
     finally:
         doc.close()
         drain_mupdf_warnings("업로드 검증")
+
+
+def extract_embedded_page_markdown(pdf_path: Path, page_number: int) -> str | None:
+    """PDF의 1-based 페이지 텍스트 레이어를 안전한 plain-text Markdown으로 추출.
+
+    각 줄을 들여쓴 code block으로 만들어 원문의 ``#``/``<PAGE>``/``---``가
+    Markdown 구조나 파이프라인 페이지 구분자로 해석되지 않게 한다. 스캔 문서처럼
+    유효한 텍스트가 없거나 MuPDF 추출이 실패하면 ``None``을 반환한다.
+    """
+    fitz = quiet_fitz()
+    doc = None
+    try:
+        doc = fitz.open(str(pdf_path))
+        if doc.needs_pass or not 1 <= page_number <= doc.page_count:
+            return None
+        text = doc[page_number - 1].get_text("text", sort=True)
+        text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
+        text = _UNSAFE_TEXT_CONTROLS.sub("", text)
+        text = "\n".join(line.rstrip() for line in text.split("\n")).strip()
+        if not text or not any(char.isalnum() for char in text):
+            return None
+        if len(text) > MAX_EMBEDDED_TEXT_CHARS:
+            logger.warning(
+                "%d페이지 PDF 텍스트 레이어가 상한(%d자)을 초과해 절단",
+                page_number,
+                MAX_EMBEDDED_TEXT_CHARS,
+            )
+            text = text[:MAX_EMBEDDED_TEXT_CHARS].rstrip() + "\n[텍스트 레이어 절단됨]"
+        indented = "\n".join(f"    {line}" if line else "" for line in text.split("\n"))
+        return f"{_EMBEDDED_RECOVERY_NOTE}\n\n{indented}"
+    except Exception as error:  # noqa: BLE001 — OCR 실패 뒤의 best-effort 복구
+        logger.warning(
+            "%d페이지 PDF 텍스트 레이어 추출 실패 (%s: %s)",
+            page_number,
+            error.__class__.__name__,
+            str(error)[:200],
+        )
+        return None
+    finally:
+        if doc is not None:
+            doc.close()
+        drain_mupdf_warnings(f"{page_number}페이지 텍스트 복구")
 
 
 def _capped_scale(w_pt: float, h_pt: float, dpi: int) -> tuple[float, int]:

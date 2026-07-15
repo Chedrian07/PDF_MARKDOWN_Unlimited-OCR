@@ -199,6 +199,19 @@ class UnlimitedEngine(OCREngine):
         eos_text = tokenizer.decode([tokenizer.eos_token_id], skip_special_tokens=False)
 
         class _SinkStreamer(TextStreamer):
+            def put(self, value) -> None:
+                # 첫 put은 프롬프트이며 TextStreamer(skip_prompt=True)가 버린다.
+                # 이후 put의 실제 생성 토큰 수는 디코딩/공백 유무와 무관한 hard
+                # limit에 사용한다. fast_decode에서는 블록 크기만큼의 overshoot만
+                # 가능하고 이 산출물은 전부 폐기된다.
+                is_prompt = self.next_tokens_are_prompt
+                super().put(value)
+                # 먼저 디코딩해야 이 블록 안의 <PAGE>가 문자 감지기의 페이지
+                # 상태를 초기화한다. 그 뒤 블록 전체를 새 페이지에 보수적으로
+                # 계수하면 경계에서 이전 페이지를 잘못 초과시키거나 토큰을 잃지 않는다.
+                if not is_prompt:
+                    repetition.feed_tokens(int(value.numel()))
+
             def on_finalized_text(self, text: str, stream_end: bool = False) -> None:
                 text = text.replace(eos_text, "\n")
                 repeated = repetition.feed(text, stream_end=stream_end)
@@ -239,7 +252,10 @@ class UnlimitedEngine(OCREngine):
         self.load()
         out_dir.mkdir(parents=True, exist_ok=True)
         s = self._settings
-        repetition = SemanticRepetitionDetector()
+        repetition = SemanticRepetitionDetector(
+            max_page_chars=s.max_page_output_chars,
+            max_page_tokens=s.max_page_output_tokens,
+        )
         try:
             try:
                 outputs, _tokens = self._model.infer_multi(
@@ -277,7 +293,10 @@ class UnlimitedEngine(OCREngine):
         self.load()
         out_dir.mkdir(parents=True, exist_ok=True)
         s = self._settings
-        repetition = SemanticRepetitionDetector()
+        repetition = SemanticRepetitionDetector(
+            max_page_chars=s.max_page_output_chars,
+            max_page_tokens=s.max_page_output_tokens,
+        )
         try:
             try:
                 outputs = self._model.infer(

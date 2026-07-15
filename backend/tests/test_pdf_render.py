@@ -2,7 +2,12 @@ import logging
 
 import pytest
 
-from app.pipeline.pdf import drain_mupdf_warnings, probe_pdf, render_pdf_pages
+from app.pipeline.pdf import (
+    drain_mupdf_warnings,
+    extract_embedded_page_markdown,
+    probe_pdf,
+    render_pdf_pages,
+)
 from app.pipeline.render import render_document_html, render_markdown_html
 
 from conftest import make_pdf_bytes
@@ -40,6 +45,54 @@ def test_render_pages(tmp_path):
     assert [p.name for p in out] == ["page_0001.png", "page_0002.png"]
     assert all(p.stat().st_size > 0 for p in out)
     assert seen == [(1, 2), (2, 2)]
+
+
+def test_extract_embedded_text_uses_global_one_based_page_number(tmp_path):
+    pdf = _write_pdf(tmp_path, pages=3, with_image=False)
+
+    page2 = extract_embedded_page_markdown(pdf, 2)
+    page3 = extract_embedded_page_markdown(pdf, 3)
+
+    assert page2 is not None and "    Sample page 2" in page2
+    assert page3 is not None and "    Sample page 3" in page3
+    assert "Sample page 1" not in page2
+    assert extract_embedded_page_markdown(pdf, 0) is None
+    assert extract_embedded_page_markdown(pdf, 4) is None
+
+
+def test_embedded_text_is_plain_markdown_and_cannot_split_pages(tmp_path):
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "# source heading\n\n---\n\n<PAGE>\n| a | b |\n* emphasis *",
+    )
+    pdf = tmp_path / "markdown-like.pdf"
+    doc.save(str(pdf))
+    doc.close()
+
+    recovered = extract_embedded_page_markdown(pdf, 1)
+
+    assert recovered is not None
+    assert recovered.startswith("> ℹ️ PDF 내장 텍스트 레이어")
+    assert "    # source heading" in recovered
+    assert "    <PAGE>" in recovered
+    assert "    | a | b |" in recovered
+    assert "\n\n---\n\n" not in recovered
+
+
+def test_image_only_page_has_no_embedded_text_fallback(tmp_path):
+    import fitz
+
+    doc = fitz.open()
+    doc.new_page()
+    pdf = tmp_path / "scan.pdf"
+    doc.save(str(pdf))
+    doc.close()
+
+    assert extract_embedded_page_markdown(pdf, 1) is None
 
 
 def test_render_progress_cb_예외가_즉시_중단(tmp_path):

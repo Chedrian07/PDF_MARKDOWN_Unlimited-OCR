@@ -68,6 +68,8 @@ class Settings:
     max_pages: int = 200
     max_upload_mb: int = 100
     max_length: int = 32768
+    max_page_output_chars: int = 16_384  # 페이지별 decoded 문자 hard limit
+    max_page_output_tokens: int = 6_144  # 페이지별 생성 토큰 hard limit
     page_separator: str = "\n\n---\n\n"
     cpu_threads: int = 0                # 0=torch 기본값 (CPU 백엔드 전용)
     fast_decode: bool = True            # 커스텀 그리디 디코드 루프 (0이면 HF generate 폴백)
@@ -97,6 +99,8 @@ class Settings:
             max_pages=_env_int("MAX_PAGES", 200),
             max_upload_mb=_env_int("MAX_UPLOAD_MB", 100),
             max_length=_env_int("MAX_LENGTH", 32768),
+            max_page_output_chars=_env_int("MAX_PAGE_OUTPUT_CHARS", 16_384),
+            max_page_output_tokens=_env_int("MAX_PAGE_OUTPUT_TOKENS", 6_144),
             page_separator=sep.encode().decode("unicode_escape") if sep else "\n\n---\n\n",
             cpu_threads=_env_int("OCR_CPU_THREADS", 0),
             fast_decode=_env_bool("OCR_FAST_DECODE", True),

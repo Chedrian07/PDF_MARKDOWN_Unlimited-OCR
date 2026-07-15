@@ -22,7 +22,7 @@ class EngineError(RuntimeError):
 
 
 class RepetitiveOutputError(EngineError):
-    """모델 생성이 숫자·좌표만 바뀌는 의미 반복에 빠져 조기 중단됨."""
+    """모델 생성이 반복에 빠지거나 페이지별 출력 상한을 넘어 조기 중단됨."""
 
 
 class JobCanceled(Exception):
