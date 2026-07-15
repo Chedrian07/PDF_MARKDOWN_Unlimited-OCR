@@ -31,6 +31,8 @@ services:
       RENDER_DPI: ${RENDER_DPI:-200}
       MAX_PAGES: ${MAX_PAGES:-200}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      MAX_PAGE_OUTPUT_CHARS: ${MAX_PAGE_OUTPUT_CHARS:-16384}
+      MAX_PAGE_OUTPUT_TOKENS: ${MAX_PAGE_OUTPUT_TOKENS:-6144}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}   # 빈 값이면 서버 기본(localhost,127.0.0.1)
       JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}    # 0 = 잡 자동 삭제 비활성 (opt-in)
       HF_TOKEN: ${HF_TOKEN:-}
@@ -82,6 +84,8 @@ services:
       RENDER_DPI: ${RENDER_DPI:-200}
       MAX_PAGES: ${MAX_PAGES:-200}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      MAX_PAGE_OUTPUT_CHARS: ${MAX_PAGE_OUTPUT_CHARS:-16384}
+      MAX_PAGE_OUTPUT_TOKENS: ${MAX_PAGE_OUTPUT_TOKENS:-6144}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}   # 빈 값이면 서버 기본(localhost,127.0.0.1)
       JOB_TTL_DAYS: ${JOB_TTL_DAYS:-0}    # 0 = 잡 자동 삭제 비활성 (opt-in)
       HF_TOKEN: ${HF_TOKEN:-}

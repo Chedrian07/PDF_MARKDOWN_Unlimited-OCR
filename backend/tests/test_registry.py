@@ -43,6 +43,16 @@ def test_env_mps_alias(monkeypatch):
     assert Settings.from_env().device == "metal"
 
 
+def test_page_output_limits_from_env(monkeypatch):
+    monkeypatch.setenv("MAX_PAGE_OUTPUT_CHARS", "12345")
+    monkeypatch.setenv("MAX_PAGE_OUTPUT_TOKENS", "4321")
+
+    settings = Settings.from_env()
+
+    assert settings.max_page_output_chars == 12_345
+    assert settings.max_page_output_tokens == 4_321
+
+
 def test_resolve_dtype():
     torch = pytest.importorskip("torch")
     from app.engine.unlimited import _resolve_dtype

@@ -18,7 +18,8 @@ from pathlib import Path
 
 from ..config import Settings
 from ..native_ops import make_ngram_logits_processor
-from .base import EngineError, OCREngine, StreamSink
+from .base import EngineError, OCREngine, RepetitiveOutputError, StreamSink
+from .repetition import SemanticRepetitionDetector
 
 logger = logging.getLogger(__name__)
 
@@ -185,21 +186,41 @@ class UnlimitedEngine(OCREngine):
         except Exception:  # pragma: no cover - 방어적
             pass
 
-    def _gen_extras(self, sink: StreamSink, cancel: threading.Event, ngram_window: int) -> dict:
+    def _gen_extras(
+        self,
+        sink: StreamSink,
+        cancel: threading.Event,
+        ngram_window: int,
+        repetition: SemanticRepetitionDetector,
+    ) -> dict:
         from transformers import StoppingCriteria, StoppingCriteriaList, TextStreamer
 
         tokenizer = self._tokenizer
         eos_text = tokenizer.decode([tokenizer.eos_token_id], skip_special_tokens=False)
 
         class _SinkStreamer(TextStreamer):
+            def put(self, value) -> None:
+                # 첫 put은 프롬프트이며 TextStreamer(skip_prompt=True)가 버린다.
+                # 이후 put의 실제 생성 토큰 수는 디코딩/공백 유무와 무관한 hard
+                # limit에 사용한다. fast_decode에서는 블록 크기만큼의 overshoot만
+                # 가능하고 이 산출물은 전부 폐기된다.
+                is_prompt = self.next_tokens_are_prompt
+                super().put(value)
+                # 먼저 디코딩해야 이 블록 안의 <PAGE>가 문자 감지기의 페이지
+                # 상태를 초기화한다. 그 뒤 블록 전체를 새 페이지에 보수적으로
+                # 계수하면 경계에서 이전 페이지를 잘못 초과시키거나 토큰을 잃지 않는다.
+                if not is_prompt:
+                    repetition.feed_tokens(int(value.numel()))
+
             def on_finalized_text(self, text: str, stream_end: bool = False) -> None:
                 text = text.replace(eos_text, "\n")
-                if text:
+                repeated = repetition.feed(text, stream_end=stream_end)
+                if text and not repeated:
                     sink.on_text(text)
 
         class _CancelCriteria(StoppingCriteria):
             def __call__(self, input_ids, scores, **kwargs) -> bool:
-                return cancel.is_set()
+                return cancel.is_set() or repetition.detected
 
         extras: dict = {
             "streamer": _SinkStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False),
@@ -231,19 +252,32 @@ class UnlimitedEngine(OCREngine):
         self.load()
         out_dir.mkdir(parents=True, exist_ok=True)
         s = self._settings
+        repetition = SemanticRepetitionDetector(
+            max_page_chars=s.max_page_output_chars,
+            max_page_tokens=s.max_page_output_tokens,
+        )
         try:
-            outputs, _tokens = self._model.infer_multi(
-                self._tokenizer,
-                prompt=MULTI_PROMPT,
-                image_files=[str(p) for p in image_paths],
-                output_path=str(out_dir),
-                image_size=1024,
-                max_length=s.max_length,
-                no_repeat_ngram_size=NGRAM_SIZE,
-                ngram_window=MULTI_NGRAM_WINDOW,
-                save_results=True,
-                **self._gen_extras(sink, cancel, MULTI_NGRAM_WINDOW),
-            )
+            try:
+                outputs, _tokens = self._model.infer_multi(
+                    self._tokenizer,
+                    prompt=MULTI_PROMPT,
+                    image_files=[str(p) for p in image_paths],
+                    output_path=str(out_dir),
+                    image_size=1024,
+                    max_length=s.max_length,
+                    no_repeat_ngram_size=NGRAM_SIZE,
+                    ngram_window=MULTI_NGRAM_WINDOW,
+                    save_results=True,
+                    **self._gen_extras(
+                        sink, cancel, MULTI_NGRAM_WINDOW, repetition
+                    ),
+                )
+            except Exception as exc:
+                if repetition.detected and not cancel.is_set():
+                    raise RepetitiveOutputError(repetition.message) from exc
+                raise
+            if repetition.detected and not cancel.is_set():
+                raise RepetitiveOutputError(repetition.message)
         finally:
             self._release_device_cache()
         # 취소 시에도 부분 출력을 반환한다 — 병합 후 취소 처리는 runner 몫
@@ -259,21 +293,34 @@ class UnlimitedEngine(OCREngine):
         self.load()
         out_dir.mkdir(parents=True, exist_ok=True)
         s = self._settings
+        repetition = SemanticRepetitionDetector(
+            max_page_chars=s.max_page_output_chars,
+            max_page_tokens=s.max_page_output_tokens,
+        )
         try:
-            outputs = self._model.infer(
-                self._tokenizer,
-                prompt=SINGLE_PROMPT,
-                image_file=str(image_path),
-                output_path=str(out_dir),
-                base_size=1024,
-                image_size=640,
-                crop_mode=True,
-                max_length=s.max_length,
-                no_repeat_ngram_size=NGRAM_SIZE,
-                ngram_window=SINGLE_NGRAM_WINDOW,
-                save_results=True,
-                **self._gen_extras(sink, cancel, SINGLE_NGRAM_WINDOW),
-            )
+            try:
+                outputs = self._model.infer(
+                    self._tokenizer,
+                    prompt=SINGLE_PROMPT,
+                    image_file=str(image_path),
+                    output_path=str(out_dir),
+                    base_size=1024,
+                    image_size=640,
+                    crop_mode=True,
+                    max_length=s.max_length,
+                    no_repeat_ngram_size=NGRAM_SIZE,
+                    ngram_window=SINGLE_NGRAM_WINDOW,
+                    save_results=True,
+                    **self._gen_extras(
+                        sink, cancel, SINGLE_NGRAM_WINDOW, repetition
+                    ),
+                )
+            except Exception as exc:
+                if repetition.detected and not cancel.is_set():
+                    raise RepetitiveOutputError(repetition.message) from exc
+                raise
+            if repetition.detected and not cancel.is_set():
+                raise RepetitiveOutputError(repetition.message)
         finally:
             self._release_device_cache()
         return outputs or ""

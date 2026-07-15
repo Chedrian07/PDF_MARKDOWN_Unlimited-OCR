@@ -21,6 +21,10 @@ class EngineError(RuntimeError):
     """엔진 실행 실패 (사용자에게 노출 가능한 메시지)."""
 
 
+class RepetitiveOutputError(EngineError):
+    """모델 생성이 반복에 빠지거나 페이지별 출력 상한을 넘어 조기 중단됨."""
+
+
 class JobCanceled(Exception):
     """사용자 취소로 중단됨."""
 
