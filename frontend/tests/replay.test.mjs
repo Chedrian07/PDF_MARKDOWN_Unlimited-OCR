@@ -32,6 +32,11 @@ import {
   translateUiStateFor,
   armTransition,
   fileSizeError,
+  jobIdFromHash,
+  statusLabel,
+  classifyFiles,
+  selectionSummary,
+  summarizeIssues,
 } from '../app.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -628,4 +633,80 @@ test('armTransition: arms on different buttons stay independent', () => {
   // 반대 방향도 동일
   assert.deepEqual(armTransition([['header:job-1', hdr]], 'job-1', item),
     { confirm: false, clearKeys: [] });
+});
+
+/* ================= 상태 라벨 + 대기열 위치 (statusLabel) ================= */
+
+test('statusLabel: queued + queue_position → 대기중 · N번째', () => {
+  assert.equal(statusLabel({ status: 'queued', queue_position: 1 }), '대기중 · 1번째');
+  assert.equal(statusLabel({ status: 'queued', queue_position: 3 }), '대기중 · 3번째');
+});
+
+test('statusLabel: 필드 부재·비정상 값·다른 상태는 기존 라벨 그대로 (안전 폴백)', () => {
+  assert.equal(statusLabel({ status: 'queued' }), '대기중', '필드 부재(구버전 서버·SSE 스냅샷)');
+  assert.equal(statusLabel({ status: 'queued', queue_position: 0 }), '대기중', '1-base 미만 무시');
+  assert.equal(statusLabel({ status: 'queued', queue_position: '2' }), '대기중', '문자열 무시');
+  assert.equal(statusLabel({ status: 'queued', queue_position: 1.5 }), '대기중', '비정수 무시');
+  assert.equal(statusLabel({ status: 'running', queue_position: 2 }), '변환중', 'queued 외 상태에는 붙지 않는다');
+  assert.equal(statusLabel({ status: 'done' }), '완료');
+  assert.equal(statusLabel({ status: 'weird' }), 'weird', '미지 상태는 원문 표기');
+});
+
+/* ================= location.hash 잡 복원 (jobIdFromHash) ================= */
+
+test('jobIdFromHash: 해시에서 잡 id 추출 — 선행 # 제거', () => {
+  assert.equal(jobIdFromHash('#abc'), 'abc');
+  assert.equal(jobIdFromHash('#j_0a1b2c3d4e5f'), 'j_0a1b2c3d4e5f', '실제 잡 id 형식(j_ + hex)');
+  assert.equal(jobIdFromHash('abc'), 'abc', '# 없는 입력도 방어적으로 허용');
+});
+
+test('jobIdFromHash: 빈/이상값은 null', () => {
+  assert.equal(jobIdFromHash(''), null);
+  assert.equal(jobIdFromHash('#'), null);
+  assert.equal(jobIdFromHash(null), null);
+  assert.equal(jobIdFromHash(undefined), null);
+  assert.equal(jobIdFromHash('#foo/bar'), null, '잡 id에 없는 문자(/) 거부');
+  assert.equal(jobIdFromHash('#<script>'), null, '이상값 거부');
+});
+
+/* ================= 다중 업로드: 검증 분류·선택 요약 ================= */
+
+test('classifyFiles: 유효/무효(파일명+사유) 분리 — 순서 유지, 전부 무효면 선택 없음', () => {
+  const files = [
+    { name: 'a.pdf', size: 10 },
+    { name: 'b.txt', size: 10 },
+    { name: 'c.pdf', size: 999 },
+  ];
+  const validate = (f) => (/\.pdf$/i.test(f.name) ? (f.size > 100 ? '너무 큼' : null) : 'PDF 아님');
+  const { valid, skipped } = classifyFiles(files, validate);
+  assert.deepEqual(valid.map((f) => f.name), ['a.pdf']);
+  assert.deepEqual(skipped.map((s) => [s.name, s.reason]),
+    [['b.txt', 'PDF 아님'], ['c.pdf', '너무 큼']]);
+  assert.equal(skipped[0].file, files[1], '재시도용 파일 참조 보존');
+  assert.equal(classifyFiles(files, () => 'x').valid.length, 0, '전부 무효 → 유효 없음');
+  assert.deepEqual(classifyFiles([], validate), { valid: [], skipped: [] });
+});
+
+test('selectionSummary: 1개면 이름·크기 그대로, 여러 개면 N개 파일 · 총 X', () => {
+  assert.equal(selectionSummary([]), null, '빈 선택은 null (file-info 숨김)');
+  assert.deepEqual(selectionSummary([{ name: 'doc.pdf', size: 512 }]),
+    { name: 'doc.pdf', size: '512 B', title: 'doc.pdf' }, '단일 파일은 기존 표시와 동일');
+  const s = selectionSummary([
+    { name: 'a.pdf', size: 1024 * 1024 },
+    { name: 'b.pdf', size: 2 * 1024 * 1024 },
+  ]);
+  assert.equal(s.name, '2개 파일');
+  assert.equal(s.size, '총 3.0 MB', '총합 크기 표기');
+  assert.equal(s.title, 'a.pdf, b.pdf', 'title에 파일명 나열');
+});
+
+test('summarizeIssues: 첫 건 + 나머지 개수 축약 (건너뜀/업로드 실패 공용)', () => {
+  assert.equal(summarizeIssues('건너뜀', []), null);
+  assert.equal(summarizeIssues('건너뜀', [{ name: 'b.txt', reason: 'PDF 아님' }]),
+    '건너뜀: b.txt — PDF 아님');
+  assert.equal(summarizeIssues('업로드 실패', [
+    { name: 'a.pdf', reason: '네트워크 오류' },
+    { name: 'b.pdf', reason: '서버 오류' },
+    { name: 'c.pdf', reason: '서버 오류' },
+  ]), '업로드 실패: a.pdf — 네트워크 오류 외 2건');
 });

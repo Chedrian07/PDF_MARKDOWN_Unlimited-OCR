@@ -260,12 +260,14 @@ async def create_job(
 
 @router.get("/jobs")
 def list_jobs(request: Request) -> dict:
-    return {"jobs": [j.to_dict() for j in _state(request).store.list()]}
+    store = _state(request).store
+    return {"jobs": [j.to_dict(queue_position=store.queue_position(j)) for j in store.list()]}
 
 
 @router.get("/jobs/{job_id}")
 def get_job(request: Request, job_id: str) -> dict:
-    return _get_job(request, job_id).to_dict()
+    job = _get_job(request, job_id)
+    return job.to_dict(queue_position=_state(request).store.queue_position(job))
 
 
 def _sse_format(event: str, data: dict) -> str:

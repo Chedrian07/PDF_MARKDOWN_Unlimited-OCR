@@ -248,3 +248,40 @@ def test_result_block_has_layout_플래그(tmp_path):
     new.dir.mkdir()
     (new.dir / "layout.json").write_text("[]", encoding="utf-8")
     assert new.to_dict()["result"]["has_layout"] is True
+
+
+def test_queue_position_for_queued_jobs(tmp_path, sample_pdf):
+    """queued 잡에만 queue_position(1-base, 생성 순서)이 붙는다 — 단일 워커 FIFO 큐.
+    with 블록(lifespan) 없이 요청하면 워커가 기동하지 않아 큐가 소비되지 않는다."""
+    from fastapi.testclient import TestClient
+
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, frontend_dir=tmp_path / "no-frontend",
+    )
+    app = create_app(settings)
+    client = TestClient(app)  # lifespan 미실행 → 워커 미기동
+    ids = [_upload(client, sample_pdf).json()["job_id"] for _ in range(3)]
+
+    listed = {j["job_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert [listed[i]["queue_position"] for i in ids] == [1, 2, 3]
+    # 상세 응답도 동일 계약
+    assert client.get(f"/api/jobs/{ids[2]}").json()["queue_position"] == 3
+
+    # 맨 앞 잡이 running으로 넘어가면 필드가 사라지고 뒤 잡들이 한 칸씩 당겨진다
+    app.state.store.get(ids[0]).status = "running"
+    listed = {j["job_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert "queue_position" not in listed[ids[0]]
+    assert [listed[i]["queue_position"] for i in ids[1:]] == [1, 2]
+
+
+def test_queue_position_absent_on_terminal_job(client, sample_pdf):
+    jid = _upload(client, sample_pdf).json()["job_id"]
+    body = wait_done(client, jid)
+    assert body["status"] == "done"
+    assert "queue_position" not in body
+    listed = {j["job_id"]: j for j in client.get("/api/jobs").json()["jobs"]}
+    assert "queue_position" not in listed[jid]

@@ -45,7 +45,7 @@
     <aside class="sidebar" aria-label="업로드 및 작업 목록">
       <!-- Upload -->
       <section class="panel">
-        <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="PDF 파일을 선택하거나 여기에 드래그하세요">
+        <div id="dropzone" class="dropzone" role="button" tabindex="0" aria-label="PDF 파일을 선택하거나 여기에 드래그하세요 (여러 개 가능)">
           <span class="dz-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -55,7 +55,7 @@
           </span>
           <p class="dz-title">PDF를 여기에 드래그</p>
           <p class="dz-sub">또는 클릭하여 파일 선택</p>
-          <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+          <input id="file-input" type="file" accept="application/pdf,.pdf" multiple hidden>
         </div>
 
         <div id="file-info" class="file-info" hidden>

@@ -159,6 +159,7 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   "status": "running",              // queued|running|done|error|canceled
   "mode": "multi",
   "created_at": "2026-07-06T10:00:00+00:00",
+  "queue_position": 2,              // 선택 — status=queued일 때만: 대기열 위치(1-base, 생성 순서)
   "progress": {
     "phase": "ocr",                 // render|ocr|merge
     "current_page": 3,              // 1-based, 처리 중/완료된 페이지

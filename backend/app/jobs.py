@@ -78,8 +78,8 @@ class Job:
             "has_layout": (self.dir / "layout.json").is_file(),
         }
 
-    def to_dict(self) -> dict:
-        return {
+    def to_dict(self, queue_position: int | None = None) -> dict:
+        d = {
             "job_id": self.id,
             "filename": self.filename,
             "status": self.status,
@@ -90,6 +90,10 @@ class Job:
             "warnings": list(self.warnings),
             "result": self._result_block(),
         }
+        # 선택 필드 — queued 잡에만 존재(계약). running/터미널 잡은 필드 자체가 없다.
+        if queue_position is not None:
+            d["queue_position"] = queue_position
+        return d
 
     def meta(self) -> dict:
         return {
@@ -130,6 +134,23 @@ class JobStore:
         with self._lock:
             jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
         return jobs[:limit]
+
+    def queue_position(self, job: Job) -> int | None:
+        """queued 잡의 대기열 위치(1-base): 먼저 생성된 queued 잡 수 + 1.
+
+        단일 워커 큐는 FIFO 제출 순서이고 제출은 업로드 완료 직후이므로 생성 순서와
+        일치한다. created_at은 초 단위라 동률이 생기므로 _jobs 삽입 순서(=create()
+        호출 순서)로 센다. running/터미널 잡은 None(직렬화 시 필드 생략)."""
+        if job.status != "queued":
+            return None
+        with self._lock:
+            pos = 1
+            for j in self._jobs.values():
+                if j.id == job.id:
+                    return pos
+                if j.status == "queued":
+                    pos += 1
+        return None  # 삭제 경합 — 목록에서 빠졌으면 위치 없음
 
     def save(self, job: Job) -> None:
         tmp = job.dir / f".{_META_NAME}.tmp"

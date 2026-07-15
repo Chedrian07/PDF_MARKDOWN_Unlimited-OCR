@@ -311,6 +311,19 @@ const STATUS_LABELS = {
   error: '오류',
   canceled: '취소됨',
 };
+
+// 잡 상태 라벨 (순수 — frontend/tests/에서 직접 검증). queued 잡에 선택 필드
+// queue_position(1-base, 큐 앞의 queued 잡 수 + 1)이 있으면 '대기중 · N번째'.
+// 필드 부재(구버전 서버·SSE 스냅샷)·비정상 값은 기존 라벨 그대로 — 안전 폴백.
+export function statusLabel(job) {
+  const status = (job && job.status) || 'queued';
+  const base = STATUS_LABELS[status] || status;
+  if (status === 'queued') {
+    const pos = job && job.queue_position;
+    if (Number.isInteger(pos) && pos >= 1) return `${base} · ${pos}번째`;
+  }
+  return base;
+}
 const THEME_KEY = 'uocr-theme';
 
 const BOX_COLORS = {
@@ -340,7 +353,9 @@ const state = {
   jobs: [],
   currentJobId: null,
   displayedStatus: null,
-  selectedFile: null,
+  queuePos: null, // 열린 잡의 마지막 대기열 위치 — queued가 아니게 되면 해제
+  selectedFiles: [], // 다중 선택 지원 — 검증을 통과한 파일들만 담긴다
+  uploading: false, // 업로드 루프 재진입 가드 — 진행 중 새 선택이 버튼을 되살리지 않게
   // /api/health 스냅샷 — 필드 부재·미수신 시 undefined (검증·비활성은 fail-open)
   maxUploadMb: undefined,
   translateAvailable: undefined,
@@ -695,7 +710,13 @@ async function refreshJobs() {
   if (state.currentJobId) {
     const open = state.jobs.find((j) => j.job_id === state.currentJobId);
     if (open) {
+      noteQueuePosition(open.status, open.queue_position);
       updateHeaderChip(open.status);
+      // queued 동안은 SSE progress가 없어 이 5초 목록 폴링이 유일한 대기열 위치
+      // 갱신원이다 — 진행 영역의 '대기중 · N번째' 문구도 여기서 함께 갱신한다.
+      if (open.status === 'queued' && state.displayedStatus === 'queued') {
+        updateProgress(open.progress || {}, 'queued');
+      }
       if (isTerminal(open.status) && !isTerminal(state.displayedStatus)) {
         syncOpenJob();
       }
@@ -720,7 +741,7 @@ function jobListItem(job) {
   const fname = job.filename || '(이름 없음)';
 
   const name = h('span', { class: 'ji-name', text: fname, title: job.filename || '' });
-  const chip = h('span', { class: `chip chip-${status}`, text: STATUS_LABELS[status] || status });
+  const chip = h('span', { class: `chip chip-${status}`, text: statusLabel(job) });
   const time = h('span', { class: 'ji-time muted', text: fmtTime(job.created_at) });
   const sub = h('span', { class: 'ji-sub' }, chip, time);
 
@@ -820,6 +841,7 @@ async function deleteJob(id) {
     state.currentJobId = null;
     state.displayedStatus = null;
     showEmptyState();
+    syncJobHash(null); // 삭제된 잡을 가리키는 해시 정리
   }
   refreshJobs();
 }
@@ -838,7 +860,34 @@ function showJobView() {
 
 function updateHeaderChip(status) {
   el.jobChip.className = `chip chip-${status}`;
-  el.jobChip.textContent = STATUS_LABELS[status] || status;
+  el.jobChip.textContent = statusLabel({ status, queue_position: state.queuePos });
+}
+
+// 잡 JSON/진행 페이로드의 대기열 위치를 상태에 흡수. queued가 아니면 해제하고,
+// queued인데 필드가 없으면(SSE 스냅샷·구버전 서버) 마지막 값을 유지한다 —
+// 계약상 필드 부재는 "기존 표시 그대로"가 안전 폴백이다.
+function noteQueuePosition(status, pos) {
+  if (status !== 'queued') state.queuePos = null;
+  else if (Number.isInteger(pos) && pos >= 1) state.queuePos = pos;
+}
+
+/* ============================ location.hash 잡 복원 ============================ */
+
+// location.hash → 잡 id (순수 — frontend/tests/에서 직접 검증).
+// '#abc' → 'abc'. 빈 해시·잡 id에 쓰이지 않는 문자가 섞인 이상값은 null.
+export function jobIdFromHash(hash) {
+  const id = String(hash || '').replace(/^#/, '');
+  return /^[\w-]+$/.test(id) ? id : null;
+}
+
+// 현재 잡을 주소창 해시에 반영 — 새로고침 복원·영속 링크용. replaceState라
+// 히스토리 스택을 오염시키지 않고 hashchange도 발생하지 않는다(자기 변경 루프
+// 없음). id=null이면 해시 제거 — 잡 삭제·404로 현재 잡이 사라진 경우.
+function syncJobHash(id) {
+  try {
+    if (id) history.replaceState(null, '', '#' + id);
+    else if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  } catch (_) { /* ignore */ }
 }
 
 /* ============================ Open / render a job ============================ */
@@ -858,6 +907,7 @@ async function openJob(id) {
     }
   }
   state.displayedStatus = null;
+  state.queuePos = null; // 이전 잡의 대기열 위치가 새 잡 칩에 새지 않도록
   state.previewLoaded = false;
   state.markdownLoaded = false;
   state.docLayoutLoaded = false;
@@ -874,6 +924,7 @@ async function openJob(id) {
     if (e.status === 404) {
       showToast('해당 작업을 찾을 수 없습니다.', 'warn');
       removeJobFromList(id);
+      syncJobHash(null); // 사라진 잡을 가리키는 해시(공유 링크 등) 정리
     } else {
       showToast('작업 정보를 불러오지 못했습니다.', 'error');
     }
@@ -883,6 +934,7 @@ async function openJob(id) {
   }
   if (state.currentJobId !== id) return; // user switched away during await
 
+  syncJobHash(id); // 성공 경로에서만 해시 동기화 — 새로고침 복원·링크 공유
   renderJob(job);
   if (job.status === 'queued' || job.status === 'running') startStream(id);
 }
@@ -908,6 +960,7 @@ async function syncOpenJob() {
 
 function renderJob(job) {
   state.displayedStatus = job.status;
+  noteQueuePosition(job.status, job.queue_position);
 
   el.jobFilename.textContent = job.filename || '(이름 없음)';
   el.jobFilename.title = job.filename || '';
@@ -962,7 +1015,10 @@ function updateProgress(p, status) {
   const totalChunks = Number(p.total_chunks) || 0;
   const chunk = Number(p.chunk) || 0;
 
-  el.progressPhase.textContent = queued ? '대기 중' : (PHASE_LABELS[p.phase] || '처리 중');
+  // queued 문구는 헤더/목록 칩과 동일 조합('대기중 · N번째')으로 통일
+  el.progressPhase.textContent = queued
+    ? statusLabel({ status: 'queued', queue_position: state.queuePos })
+    : (PHASE_LABELS[p.phase] || '처리 중');
   el.progressSpinner.hidden = !queued;
 
   const determinate = !queued && total > 0;
@@ -984,6 +1040,7 @@ function applyProgress(d) {
   const status = d.status || state.displayedStatus;
   const wasRunning = state.displayedStatus === 'queued' || state.displayedStatus === 'running';
   state.displayedStatus = status;
+  noteQueuePosition(status, d.queue_position);
   updateHeaderChip(status);
 
   const running = status === 'queued' || status === 'running';
@@ -1446,6 +1503,7 @@ async function requestCancel() {
     state.currentJobId = null;
     state.displayedStatus = null;
     showEmptyState();
+    syncJobHash(null); // 404로 사라진 잡 — 해시 정리
     showToast('해당 작업을 찾을 수 없습니다.', 'warn');
     return;
   }
@@ -1598,7 +1656,7 @@ function startFallbackPolling(id) {
         clearSsePromote();
         if (state.es) { try { state.es.close(); } catch (_) { /* ignore */ } state.es = null; } // 재승격 시도 중이던 es
         removeJobFromList(id);
-        if (state.currentJobId === id) { state.currentJobId = null; showEmptyState(); }
+        if (state.currentJobId === id) { state.currentJobId = null; showEmptyState(); syncJobHash(null); }
       }
       return;
     }
@@ -1614,7 +1672,10 @@ function startFallbackPolling(id) {
       renderJob(job);
       refreshJobs();
     } else {
-      applyProgress(Object.assign({}, job.progress || {}, { status: job.status }));
+      applyProgress(Object.assign({}, job.progress || {}, {
+        status: job.status,
+        queue_position: job.queue_position, // 상세 폴링도 대기열 위치를 반영
+      }));
     }
   }, 1000);
 }
@@ -2245,27 +2306,78 @@ function validateFile(file) {
   return null;
 }
 
-function setSelectedFile(file) {
-  // 픽커·드래그드롭 공통 진입점 — 형식 검증에 이어 서버 상한 크기 사전 검증
-  const errMsg = validateFile(file) || fileSizeError(file.size, state.maxUploadMb);
-  if (errMsg) {
-    state.selectedFile = null;
-    el.fileInfo.hidden = true;
-    el.uploadBtn.disabled = true;
-    showUploadError(errMsg);
-    return;
+// 다중 선택 검증 분류 (순수 — frontend/tests/에서 직접 검증). validate(file)는
+// 오류 문구 또는 null을 반환. 유효 파일과 '건너뜀' 대상(파일명+사유)으로 나눈다.
+export function classifyFiles(files, validate) {
+  const valid = [];
+  const skipped = [];
+  for (const f of Array.from(files || [])) {
+    const reason = validate(f);
+    if (reason) skipped.push({ file: f, name: (f && f.name) || '(이름 없음)', reason });
+    else valid.push(f);
   }
-  hideUploadError();
-  state.selectedFile = file;
-  el.fileName.textContent = file.name;
-  el.fileName.title = file.name;
-  el.fileSize.textContent = fmtBytes(file.size);
-  el.fileInfo.hidden = false;
-  el.uploadBtn.disabled = false;
+  return { valid, skipped };
 }
 
-function clearSelectedFile() {
-  state.selectedFile = null;
+// file-info 표시 문구 (순수 — 테스트 대상). 1개면 기존 단일 표시(이름·크기),
+// 여러 개면 'N개 파일 · 총 X' + title에 파일명 나열. 빈 선택은 null.
+export function selectionSummary(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return null;
+  if (list.length === 1) {
+    return { name: list[0].name, size: fmtBytes(Number(list[0].size) || 0), title: list[0].name };
+  }
+  const total = list.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+  return {
+    name: `${list.length}개 파일`,
+    size: `총 ${fmtBytes(total)}`,
+    title: list.map((f) => f.name).join(', '),
+  };
+}
+
+// '첫 건 + 나머지 개수' 요약 (순수 — 테스트 대상). entries: [{name, reason}].
+// prefix 예: '건너뜀' | '업로드 실패'. 빈 배열이면 null.
+export function summarizeIssues(prefix, entries) {
+  if (!entries || !entries.length) return null;
+  const first = `${prefix}: ${entries[0].name} — ${entries[0].reason}`;
+  return entries.length === 1 ? first : `${first} 외 ${entries.length - 1}건`;
+}
+
+// 형식 검증에 이어 서버 상한 크기 사전 검증 — 선택·업로드 직전 공통.
+function fileValidationError(file) {
+  return validateFile(file) || fileSizeError(file && file.size, state.maxUploadMb);
+}
+
+// 현재 선택(state.selectedFiles)을 file-info와 업로드 버튼에 반영.
+function renderFileInfo() {
+  const s = selectionSummary(state.selectedFiles);
+  if (!s) {
+    el.fileInfo.hidden = true;
+    el.uploadBtn.disabled = true;
+    return;
+  }
+  el.fileName.textContent = s.name;
+  el.fileName.title = s.title;
+  el.fileSize.textContent = s.size;
+  el.fileInfo.hidden = false;
+  // 업로드 진행 중의 새 선택은 버튼을 되살리지 않는다 — 루프 이중 진입 방지.
+  // 진행 중 선택은 setUploading(false)가 끝나며 재활성화된다.
+  el.uploadBtn.disabled = state.uploading;
+}
+
+// 픽커·드래그드롭 공통 진입점 — 파일별 검증으로 유효분만 선택에 담고, 무효분은
+// '건너뜀' 요약을 기존 업로드 에러 영역에 안내한다(전부 무효면 선택 없음).
+function setSelectedFiles(files) {
+  const { valid, skipped } = classifyFiles(files, fileValidationError);
+  const skipMsg = summarizeIssues('건너뜀', skipped);
+  if (skipMsg) showUploadError(skipMsg);
+  else hideUploadError();
+  state.selectedFiles = valid;
+  renderFileInfo();
+}
+
+function clearSelectedFiles() {
+  state.selectedFiles = [];
   el.fileInput.value = '';
   el.fileInfo.hidden = true;
   el.uploadBtn.disabled = true;
@@ -2282,7 +2394,8 @@ function hideUploadError() {
 }
 
 function setUploading(on) {
-  el.uploadBtn.disabled = on || !state.selectedFile;
+  state.uploading = on;
+  el.uploadBtn.disabled = on || !state.selectedFiles.length;
   el.uploadBtn.textContent = on ? '업로드 중…' : '변환 시작';
   el.dropzone.classList.toggle('disabled', on);
 }
@@ -2334,75 +2447,105 @@ function readDpi() {
   return dpi;
 }
 
+// HTTP 실패 상태 → 실패 사유 문구. 서버 detail(실시간 상한 포함)을 우선하고,
+// 413은 health로 받은 상한, 그마저 없으면 중립 문구.
+function uploadFailureMessage(status, data) {
+  const detail = data && typeof data.detail === 'string' ? data.detail : null;
+  if (detail) return detail;
+  if (status === 413) {
+    return state.maxUploadMb
+      ? `파일이 너무 큽니다. 더 작은 PDF를 업로드해 주세요. (최대 ${state.maxUploadMb}MB)`
+      : '파일이 너무 커서 서버 업로드 상한을 초과했습니다. 더 작은 PDF를 업로드해 주세요.';
+  }
+  if (status === 400) return '유효하지 않은 PDF 파일입니다.';
+  return `업로드에 실패했습니다. (${status})`;
+}
+
+// 순차 다중 업로드 — 파일별로 기존 XHR 경로(uploadWithProgress)를 재사용하고
+// 진행바는 파일 단위로 리셋한다. 첫 성공 잡은 즉시 openJob(대기하지 않음 —
+// 업로드 도중 잡 전환이 일어나도 루프는 계속), 이후 성공은 목록 upsert만.
+// 개별 실패는 수집해 끝에 요약하고, 실패분만 선택에 남겨 재시도할 수 있게 한다.
 async function handleUpload() {
-  if (!state.selectedFile) return;
+  if (state.uploading || !state.selectedFiles.length) return; // 재진입 가드
   hideUploadError();
 
-  const file = state.selectedFile;
   // 선택 시점에는 health 미수신이었어도 이후 수신됐으면 여기서 한 번 더 차단
-  const sizeErr = fileSizeError(file.size, state.maxUploadMb);
-  if (sizeErr) { showUploadError(sizeErr); return; }
-  const fileName = file.name;
+  const { valid, skipped } = classifyFiles(state.selectedFiles, fileValidationError);
+  if (!valid.length) {
+    showUploadError(summarizeIssues('건너뜀', skipped) || '업로드할 수 있는 파일이 없습니다.');
+    return;
+  }
+
+  const selectionAtStart = state.selectedFiles;
   const mode = readMode();
   const dpi = readDpi();
-
-  const form = new FormData();
-  form.append('file', file);
-  form.append('mode', mode);
-  form.append('dpi', String(dpi));
+  const failures = skipped.slice(); // {file, name, reason} — 뒤늦게 걸러진 파일도 요약에 포함
+  let successCount = 0;
+  let firstJobId = null;
 
   setUploading(true);
-  showUploadProgress(0);
-  let res;
-  try {
-    res = await uploadWithProgress('/api/jobs', form, showUploadProgress);
-  } catch (_) {
-    setUploading(false);
-    hideUploadProgress();
-    showUploadError('업로드 중 네트워크 오류가 발생했습니다. 다시 시도해 주세요.');
-    return;
+  for (let i = 0; i < valid.length; i += 1) {
+    const file = valid[i];
+    if (valid.length > 1) el.uploadBtn.textContent = `업로드 중… (${i + 1}/${valid.length})`;
+    showUploadProgress(0); // 파일 단위 리셋
+
+    const form = new FormData();
+    form.append('file', file);
+    form.append('mode', mode);
+    form.append('dpi', String(dpi));
+
+    let res;
+    try {
+      res = await uploadWithProgress('/api/jobs', form, showUploadProgress);
+    } catch (_) {
+      failures.push({ file, name: file.name, reason: '네트워크 오류가 발생했습니다. 다시 시도해 주세요.' });
+      continue;
+    }
+    const data = res.text ? safeParse(res.text) : null;
+    if (!(res.status >= 200 && res.status < 300)) {
+      failures.push({ file, name: file.name, reason: uploadFailureMessage(res.status, data) });
+      continue;
+    }
+    const jobId = data && data.job_id;
+    if (!jobId) {
+      failures.push({ file, name: file.name, reason: '서버 응답이 올바르지 않습니다.' });
+      continue;
+    }
+
+    successCount += 1;
+    // Optimistically add to history; the first success opens + streams.
+    upsertJob({
+      job_id: jobId,
+      filename: file.name,
+      status: data.status || 'queued',
+      mode,
+      created_at: new Date().toISOString(),
+      progress: {},
+      result: null,
+      error: null,
+    });
+    if (firstJobId === null) {
+      firstJobId = jobId;
+      openJob(jobId); // 나머지 업로드와 병행 — 루프는 currentJobId에 의존하지 않는다
+    }
   }
   hideUploadProgress();
 
-  const data = res.text ? safeParse(res.text) : null;
-  const ok = res.status >= 200 && res.status < 300;
-
-  if (!ok) {
-    setUploading(false);
-    if (res.status === 413) {
-      // 서버 detail(실시간 상한 포함)을 우선하고 — 400 분기와 같은 패턴 —
-      // 없으면 health로 받은 값, 그마저 없으면 중립 문구.
-      showUploadError((data && data.detail) || (state.maxUploadMb
-        ? `파일이 너무 큽니다. 더 작은 PDF를 업로드해 주세요. (최대 ${state.maxUploadMb}MB)`
-        : '파일이 너무 커서 서버 업로드 상한을 초과했습니다. 더 작은 PDF를 업로드해 주세요.'));
-    } else if (res.status === 400) {
-      showUploadError((data && data.detail) || '유효하지 않은 PDF 파일입니다.');
-    } else {
-      showUploadError((data && data.detail) || `업로드에 실패했습니다. (${res.status})`);
-    }
-    return;
+  // 업로드 도중 사용자가 선택을 바꿨다면(드롭 등) 그 새 선택은 건드리지 않는다.
+  if (state.selectedFiles === selectionAtStart) {
+    state.selectedFiles = failures.map((f) => f.file); // 실패분만 남겨 재시도 가능
+    if (!failures.length) el.fileInput.value = '';
+    renderFileInfo();
   }
-
   setUploading(false);
-  const jobId = data && data.job_id;
-  if (!jobId) {
-    showUploadError('서버 응답이 올바르지 않습니다.');
-    return;
-  }
 
-  // Optimistically add to history, then open + stream.
-  upsertJob({
-    job_id: jobId,
-    filename: fileName,
-    status: data.status || 'queued',
-    mode,
-    created_at: new Date().toISOString(),
-    progress: {},
-    result: null,
-    error: null,
-  });
-  clearSelectedFile();
-  await openJob(jobId);
+  if (failures.length) {
+    showUploadError(summarizeIssues('업로드 실패', failures));
+    showToast(`업로드 요약 — 성공 ${successCount} · 실패 ${failures.length}`,
+      successCount ? 'warn' : 'error');
+  } else if (valid.length > 1) {
+    showToast(`${successCount}개 파일이 업로드되었습니다.`);
+  }
   refreshJobs();
 }
 
@@ -2422,13 +2565,13 @@ function setupDropzone() {
     ev.preventDefault();
     dz.classList.remove('dragover');
     const files = ev.dataTransfer && ev.dataTransfer.files;
-    if (files && files.length) setSelectedFile(files[0]);
+    if (files && files.length) setSelectedFiles(files);
   });
   el.fileInput.addEventListener('change', () => {
-    if (el.fileInput.files && el.fileInput.files.length) setSelectedFile(el.fileInput.files[0]);
+    if (el.fileInput.files && el.fileInput.files.length) setSelectedFiles(el.fileInput.files);
   });
   el.fileClear.innerHTML = ICON.x;
-  el.fileClear.addEventListener('click', clearSelectedFile);
+  el.fileClear.addEventListener('click', clearSelectedFiles);
 }
 
 /* ============================ Tabs / result wiring ============================ */
@@ -2503,9 +2646,21 @@ function init() {
   el.pageImg.addEventListener('load', onPageImgLoad);
   el.pageImg.addEventListener('error', onPageImgError);
 
+  // 사용자가 주소창을 직접 고치거나 뒤로가기로 해시가 바뀐 경우 해당 잡을 연다.
+  // 우리가 만드는 변경은 replaceState라 hashchange가 발생하지 않는다(루프 없음).
+  window.addEventListener('hashchange', () => {
+    const id = jobIdFromHash(location.hash);
+    if (id && id !== state.currentJobId) openJob(id);
+  });
+
   showEmptyState();
   loadHealth();
-  refreshJobs();
+  refreshJobs().then(() => {
+    // 첫 잡 목록 수신 직후 해시의 잡 복원 — 새로고침·공유 링크 진입.
+    // 404면 openJob의 기존 처리(토스트)가 동작하고 해시를 비운다.
+    const id = jobIdFromHash(location.hash);
+    if (id) openJob(id);
+  });
   state.jobsTimer = setInterval(refreshJobs, 5000);
 
   window.addEventListener('beforeunload', teardownConnections);
