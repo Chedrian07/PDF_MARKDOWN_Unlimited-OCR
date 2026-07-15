@@ -178,6 +178,18 @@ def _run_translate_thread(
             st.translate_tasks.pop((job.id, lang), None)
 
 
+def _translate_available() -> bool:
+    """POST /translate의 503 판정과 동일 경로(TranslateConfig.from_env) 재사용.
+    env 딕셔너리 조회 + 문자열 파싱뿐이라 주기 폴링(health)에도 충분히 가볍다."""
+    try:
+        TranslateConfig.from_env()
+        return True
+    except (TranslateError, ValueError):
+        # ValueError: 숫자형 env 오타(예: TRANSLATE_CONCURRENCY=abc)로 int()/float() 파싱 실패.
+        # health가 500으로 죽지 않도록 '번역 불가'로만 강등한다.
+        return False
+
+
 @router.get("/health")
 def health(request: Request) -> dict:
     st = _state(request)
@@ -193,6 +205,8 @@ def health(request: Request) -> dict:
         "model_load_error": None if engine.loaded else st.load_state.get("error"),
         "gpu_name": engine.gpu_name(),
         "native_ops": native_ops.HAVE_NATIVE,
+        "max_upload_mb": st.settings.max_upload_mb,
+        "translate_available": _translate_available(),
     }
 
 

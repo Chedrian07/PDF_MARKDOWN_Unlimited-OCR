@@ -134,7 +134,9 @@ layout/page_0001.jpg ...    # 레이아웃 박스 오버레이
   "model_id": "baidu/Unlimited-OCR",
   "model_loaded": true,             // false면 첫 잡에서 로딩
   "gpu_name": "NVIDIA GeForce RTX 5070 Ti",  // cpu면 null
-  "native_ops": true                // C++ 모듈 사용 여부
+  "native_ops": true,               // C++ 모듈 사용 여부
+  "max_upload_mb": 100,             // 업로드 상한 (MAX_UPLOAD_MB 그대로)
+  "translate_available": true       // 번역 프로바이더 설정 여부 — false면 POST /translate가 503
 }
 ```
 

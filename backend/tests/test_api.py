@@ -20,6 +20,34 @@ def test_health(client):
     assert "native_ops" in body
 
 
+def test_health_reports_max_upload_mb(tmp_path):
+    """max_upload_mb는 settings 값 그대로 노출 — 프런트가 업로드 상한 안내에 쓴다."""
+    from fastapi.testclient import TestClient
+
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        engine="fake", device="cpu", data_dir=tmp_path / "data",
+        preload_model=False, frontend_dir=tmp_path / "no-frontend",
+        max_upload_mb=7,
+    )
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/health").json()["max_upload_mb"] == 7
+
+
+def test_health_translate_available_follows_env(client, monkeypatch):
+    """translate_available은 POST /translate의 503 판정(TranslateConfig.from_env)과
+    동일 — 프로바이더 env 유무에 따라 False/True로 바뀐다."""
+    for k in ("OPENAI_BASE_URL", "OPENAI_MODEL", "TRANSLATE_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+    assert client.get("/api/health").json()["translate_available"] is False
+
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:1234/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    assert client.get("/api/health").json()["translate_available"] is True
+
+
 def test_untrusted_host_header_rejected(client):
     """TrustedHostMiddleware — 화이트리스트 밖 Host는 400 (DNS rebinding 방어)."""
     r = client.get("/api/health", headers={"host": "evil.example.com"})

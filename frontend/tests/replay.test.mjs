@@ -31,6 +31,7 @@ import {
   withLangUrl,
   translateUiStateFor,
   armTransition,
+  fileSizeError,
 } from '../app.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -559,6 +560,37 @@ test('translateUiStateFor: state → control mapping', () => {
   assert.equal(translateUiStateFor('error'), 'button');
   assert.equal(translateUiStateFor('canceled'), 'button');
   assert.equal(translateUiStateFor(undefined), 'button');
+});
+
+/* ================= upload size preflight (fileSizeError) ================= */
+
+test('fileSizeError: 경계값 — 정확히 상한이면 통과, 1바이트 초과부터 차단', () => {
+  const limitBytes = 100 * 1024 * 1024;
+  assert.equal(fileSizeError(limitBytes, 100), null, '상한과 같으면 허용');
+  const err = fileSizeError(limitBytes + 1, 100);
+  assert.ok(err && err.includes('파일이 너무 큽니다'), '초과분은 안내 문구 반환');
+  assert.ok(err.includes('서버 상한 100MB'), '서버 상한이 문구에 표기된다');
+});
+
+test('fileSizeError: 문구에 파일 크기와 서버 상한이 함께 표기된다', () => {
+  assert.equal(fileSizeError(150 * 1024 * 1024, 100),
+    '파일이 너무 큽니다 (150 MB — 서버 상한 100MB)');
+});
+
+test('fileSizeError: 반올림 경계에서 자기모순 문구를 피한다 (100 MB — 상한 100MB 금지)', () => {
+  // 상한+1바이트는 fmtBytes 반올림상 '100 MB'로 표시돼 상한과 같아 보이므로
+  // 크기 병기를 생략하고 '상한 초과'로만 안내한다.
+  assert.equal(fileSizeError(100 * 1024 * 1024 + 1, 100),
+    '파일이 너무 큽니다 (서버 상한 100MB 초과)');
+});
+
+test('fileSizeError: health 미수신/비정상 상한이면 검증 생략 (서버 413이 최후 방어)', () => {
+  const big = 500 * 1024 * 1024;
+  assert.equal(fileSizeError(big, undefined), null, '필드 부재(undefined)');
+  assert.equal(fileSizeError(big, null), null);
+  assert.equal(fileSizeError(big, 0), null, '0 이하 상한은 무시');
+  assert.equal(fileSizeError(big, -1), null);
+  assert.equal(fileSizeError(big, 'abc'), null, '숫자가 아닌 상한은 무시');
 });
 
 /* ================= two-step delete confirm (armTransition) ================= */

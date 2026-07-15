@@ -341,6 +341,9 @@ const state = {
   currentJobId: null,
   displayedStatus: null,
   selectedFile: null,
+  // /api/health 스냅샷 — 필드 부재·미수신 시 undefined (검증·비활성은 fail-open)
+  maxUploadMb: undefined,
+  translateAvailable: undefined,
   // raw stream pane
   streamPending: '',
   streamPageNo: 0, // markers seen by the raw pane — divider k reads "페이지 k"
@@ -414,6 +417,8 @@ const EL_IDS = {
   fileClear: 'file-clear',
   uploadError: 'upload-error',
   uploadBtn: 'upload-btn',
+  uploadProgress: 'upload-progress',
+  uploadProgressFill: 'upload-progress-fill',
   dpiInput: 'dpi-input',
   jobList: 'job-list',
   jobListEmpty: 'job-list-empty',
@@ -619,6 +624,12 @@ async function loadHealth() {
 }
 
 function renderHealth(d) {
+  // 업로드 사전 검증·번역 버튼 가용성이 소비하는 계약 필드 보관.
+  // 구버전 서버 응답(필드 부재)은 undefined 유지 — 두 소비처 모두 fail-open.
+  state.maxUploadMb = typeof d.max_upload_mb === 'number' ? d.max_upload_mb : undefined;
+  state.translateAvailable = typeof d.translate_available === 'boolean' ? d.translate_available : undefined;
+  applyTranslateAvailability(); // 잡 뷰가 열려 있는 동안의 health 갱신도 버튼에 반영
+
   const c = el.healthBadges;
   c.textContent = '';
 
@@ -706,18 +717,24 @@ function renderJobList() {
 function jobListItem(job) {
   const status = job.status || 'queued';
   const active = job.job_id === state.currentJobId;
+  const fname = job.filename || '(이름 없음)';
 
-  const name = h('span', { class: 'ji-name', text: job.filename || '(이름 없음)', title: job.filename || '' });
+  const name = h('span', { class: 'ji-name', text: fname, title: job.filename || '' });
   const chip = h('span', { class: `chip chip-${status}`, text: STATUS_LABELS[status] || status });
   const time = h('span', { class: 'ji-time muted', text: fmtTime(job.created_at) });
-  const sub = h('div', { class: 'ji-sub' }, chip, time);
-  const main = h('div', { class: 'ji-main' }, name, sub);
+  const sub = h('span', { class: 'ji-sub' }, chip, time);
 
-  const del = h('button', { class: 'ji-del icon-btn-sm', type: 'button', 'aria-label': '삭제', title: '삭제', html: ICON.x });
-  del.addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    armDelete(del, job.job_id, () => deleteJob(job.job_id));
+  // 잡 열기·삭제를 형제 버튼으로 분리 — role="button" li 안에 버튼을 중첩하면
+  // 스크린리더가 내부 삭제 버튼에 진입할 수 없다(중첩 인터랙티브 컨트롤 금지).
+  const open = h('button', { class: 'ji-open', type: 'button' },
+    h('span', { class: 'ji-main' }, name, sub));
+  open.addEventListener('click', () => openJob(job.job_id));
+
+  const del = h('button', {
+    class: 'ji-del icon-btn-sm', type: 'button',
+    'aria-label': `"${fname}" 삭제`, title: '삭제', html: ICON.x,
   });
+  del.addEventListener('click', () => armDelete(del, job.job_id, () => deleteJob(job.job_id)));
   // 재렌더가 무장(armed) 상태를 파괴하지 않도록 살아있는 무장을 새 버튼에 복원.
   // 만료 타이머가 최신 버튼을 해제하도록 참조도 교체한다.
   const arm = armTimers.get(job.job_id);
@@ -728,12 +745,7 @@ function jobListItem(job) {
     del.title = '한 번 더 클릭하면 삭제됩니다';
   }
 
-  const li = h('li', { class: `job-item${active ? ' active' : ''}`, role: 'button', tabindex: '0' }, main, del);
-  li.addEventListener('click', () => openJob(job.job_id));
-  li.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openJob(job.job_id); }
-  });
-  return li;
+  return h('li', { class: `job-item${active ? ' active' : ''}` }, open, del);
 }
 
 // 2단계 삭제 확인의 클릭 전이 (순수 — 테스트 대상). entries는 [key, owner] 쌍의
@@ -1813,12 +1825,32 @@ function resetTranslateUI() {
   setResultLangAttr();
 }
 
+// health의 translate_available을 버튼에 반영 — false일 때만 비활성.
+// undefined(미수신·구버전 서버)는 활성 유지(fail-open, 서버 503이 최후 방어).
+// 가용성 사유의 비활성만 dataset으로 표시해, 요청 중 일시 비활성(startTranslate)을
+// health 갱신이 잘못 풀어버리지 않게 한다.
+function applyTranslateAvailability() {
+  const btn = el.translateBtn;
+  if (state.translateAvailable === false) {
+    btn.disabled = true;
+    btn.title = '번역 프로바이더가 설정되지 않았습니다 (.env 설정 후 재시작)';
+    btn.dataset.unavailable = '1';
+  } else {
+    btn.removeAttribute('title');
+    if (btn.dataset.unavailable) {
+      delete btn.dataset.unavailable;
+      btn.disabled = false;
+    }
+  }
+}
+
 /* ── 컨트롤 3종 교체 노출 ─────────────────────────────────────────────── */
 function showTranslateButton() {
   el.translateBtn.hidden = false;
   el.translateProgress.hidden = true;
   el.langToggle.hidden = true;
   el.translateBtn.disabled = false;
+  applyTranslateAvailability(); // 프로바이더 미설정이면 비활성 + 안내 title
 }
 function showTranslateProgress(current, total) {
   el.translateBtn.hidden = true;
@@ -2189,6 +2221,22 @@ function renderError(message, canceled) {
 
 /* ============================ Upload ============================ */
 
+// 파일 크기 사전 검증 (순수 — frontend/tests/에서 직접 검증). 상한 초과면 안내
+// 문구, 통과면 null. limitMb 미수신(undefined 등 비정상)이면 검증을 생략한다
+// — 서버 413이 최후 방어.
+export function fileSizeError(sizeBytes, limitMb) {
+  const limit = Number(limitMb);
+  const size = Number(sizeBytes);
+  if (!Number.isFinite(limit) || limit <= 0 || !Number.isFinite(size)) return null;
+  if (size <= limit * 1024 * 1024) return null;
+  // 표시 반올림이 상한과 같아지는 경계(상한+1바이트 → '100 MB — 상한 100MB')의
+  // 자기모순 문구를 피한다 — 반올림 표시가 상한을 명확히 넘을 때만 크기를 병기.
+  const sizeMb = size / (1024 * 1024);
+  return sizeMb - limit >= 0.05
+    ? `파일이 너무 큽니다 (${fmtBytes(size)} — 서버 상한 ${limit}MB)`
+    : `파일이 너무 큽니다 (서버 상한 ${limit}MB 초과)`;
+}
+
 function validateFile(file) {
   const name = file && file.name ? file.name : '';
   if (!/\.pdf$/i.test(name)) return 'PDF 파일만 업로드할 수 있습니다. (.pdf)';
@@ -2198,7 +2246,8 @@ function validateFile(file) {
 }
 
 function setSelectedFile(file) {
-  const errMsg = validateFile(file);
+  // 픽커·드래그드롭 공통 진입점 — 형식 검증에 이어 서버 상한 크기 사전 검증
+  const errMsg = validateFile(file) || fileSizeError(file.size, state.maxUploadMb);
   if (errMsg) {
     state.selectedFile = null;
     el.fileInfo.hidden = true;
@@ -2238,6 +2287,40 @@ function setUploading(on) {
   el.dropzone.classList.toggle('disabled', on);
 }
 
+// 업로드 진행바 (progress-track/fill 재사용). frac=null이면 총량을 알 수 없는
+// 전송(lengthComputable=false) — indeterminate 애니메이션으로 표시.
+function showUploadProgress(frac) {
+  el.uploadProgress.hidden = false;
+  const indet = frac == null;
+  el.uploadProgress.classList.toggle('indeterminate', indet);
+  el.uploadProgressFill.style.width = indet ? '' : `${Math.min(100, Math.max(0, frac * 100))}%`;
+}
+
+function hideUploadProgress() {
+  el.uploadProgress.hidden = true;
+  el.uploadProgress.classList.remove('indeterminate');
+  el.uploadProgressFill.style.width = '';
+}
+
+// XHR 업로드 — fetch에는 업로드 진행 이벤트가 없어 진행률 표시용으로만 XHR을
+// 쓴다. 응답은 fetch 경로와 같은 의미의 {status, text}로 통일하고, 전송 실패
+// (네트워크 오류)만 reject한다. HTTP 오류 상태는 resolve — 호출부가 분기한다.
+function uploadWithProgress(url, form, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    if (xhr.upload) {
+      xhr.upload.addEventListener('progress', (e) => {
+        onProgress(e.lengthComputable && e.total > 0 ? e.loaded / e.total : null);
+      });
+    }
+    xhr.addEventListener('load', () => resolve({ status: xhr.status, text: xhr.responseText || '' }));
+    xhr.addEventListener('error', () => reject(new Error('network error')));
+    xhr.addEventListener('abort', () => reject(new Error('aborted')));
+    xhr.send(form);
+  });
+}
+
 function readMode() {
   const checked = el.modeRadios.find((r) => r.checked);
   return checked ? checked.value : 'multi';
@@ -2256,6 +2339,9 @@ async function handleUpload() {
   hideUploadError();
 
   const file = state.selectedFile;
+  // 선택 시점에는 health 미수신이었어도 이후 수신됐으면 여기서 한 번 더 차단
+  const sizeErr = fileSizeError(file.size, state.maxUploadMb);
+  if (sizeErr) { showUploadError(sizeErr); return; }
   const fileName = file.name;
   const mode = readMode();
   const dpi = readDpi();
@@ -2266,22 +2352,29 @@ async function handleUpload() {
   form.append('dpi', String(dpi));
 
   setUploading(true);
+  showUploadProgress(0);
   let res;
   try {
-    res = await fetch('/api/jobs', { method: 'POST', body: form });
+    res = await uploadWithProgress('/api/jobs', form, showUploadProgress);
   } catch (_) {
     setUploading(false);
+    hideUploadProgress();
     showUploadError('업로드 중 네트워크 오류가 발생했습니다. 다시 시도해 주세요.');
     return;
   }
+  hideUploadProgress();
 
-  const text = await res.text().catch(() => '');
-  const data = text ? safeParse(text) : null;
+  const data = res.text ? safeParse(res.text) : null;
+  const ok = res.status >= 200 && res.status < 300;
 
-  if (!res.ok) {
+  if (!ok) {
     setUploading(false);
     if (res.status === 413) {
-      showUploadError('파일이 너무 큽니다. 더 작은 PDF를 업로드해 주세요. (최대 100MB)');
+      // 서버 detail(실시간 상한 포함)을 우선하고 — 400 분기와 같은 패턴 —
+      // 없으면 health로 받은 값, 그마저 없으면 중립 문구.
+      showUploadError((data && data.detail) || (state.maxUploadMb
+        ? `파일이 너무 큽니다. 더 작은 PDF를 업로드해 주세요. (최대 ${state.maxUploadMb}MB)`
+        : '파일이 너무 커서 서버 업로드 상한을 초과했습니다. 더 작은 PDF를 업로드해 주세요.'));
     } else if (res.status === 400) {
       showUploadError((data && data.detail) || '유효하지 않은 PDF 파일입니다.');
     } else {

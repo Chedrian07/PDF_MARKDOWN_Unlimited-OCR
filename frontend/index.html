@@ -75,6 +75,11 @@
         <div id="upload-error" class="inline-error" role="alert" hidden></div>
 
         <button id="upload-btn" class="btn btn-primary btn-block" type="button" disabled>변환 시작</button>
+
+        <!-- 업로드 전송 진행률 (XHR upload.onprogress; JS가 표시/숨김) -->
+        <div id="upload-progress" class="progress-track upload-progress" hidden>
+          <div id="upload-progress-fill" class="progress-fill"></div>
+        </div>
       </section>
 
       <!-- Options -->
