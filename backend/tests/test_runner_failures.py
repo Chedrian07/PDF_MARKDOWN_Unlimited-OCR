@@ -6,9 +6,10 @@ FlakyEngine: FakeEngine을 상속해 지정한 호출 번호(1-based)에서만 �
 
 import json
 import threading
+from pathlib import Path
 
 from app.config import Settings
-from app.engine.base import JobCanceled
+from app.engine.base import JobCanceled, RepetitiveOutputError
 from app.engine.fake import FakeEngine
 from app.jobs import EventBroker, JobStore
 from app.pipeline.runner import execute_job
@@ -39,6 +40,64 @@ class FlakyEngine(FakeEngine):
 
     def run_single(self, image_path, out_dir, sink, cancel):
         self._maybe_fail()
+        return super().run_single(image_path, out_dir, sink, cancel)
+
+
+class LoopFallbackEngine(FakeEngine):
+    """첫 multi 호출을 반복 오류로 만들고 single 폴백 호출을 기록한다."""
+
+    def __init__(
+        self,
+        *,
+        fail_single_pages=(),
+        fail_single_once_pages=(),
+        loop_single_pages=(),
+        cancel_on_multi_loop=False,
+    ):
+        super().__init__(delay=0.0)
+        self.multi_calls = 0
+        self.single_calls: dict[int, int] = {}
+        self.fail_single_pages = set(fail_single_pages)
+        self.fail_single_once_pages = set(fail_single_once_pages)
+        self.loop_single_pages = set(loop_single_pages)
+        self.cancel_on_multi_loop = cancel_on_multi_loop
+
+    @staticmethod
+    def _page_number(image_path) -> int:
+        return int(Path(image_path).stem.rsplit("_", 1)[-1])
+
+    @staticmethod
+    def _write_single_poison(out_dir) -> None:
+        images = out_dir / "images"
+        images.mkdir(parents=True, exist_ok=True)
+        (images / "99.jpg").write_bytes(b"partial single output")
+        (out_dir / "result_with_boxes.jpg").write_bytes(b"partial layout")
+        (out_dir / "raw_pages.json").write_text(
+            json.dumps({"pages": ["partial repeated layout"]}), encoding="utf-8"
+        )
+
+    def run_multi(self, image_paths, out_dir, sink, cancel):
+        self.multi_calls += 1
+        if self.multi_calls == 1:
+            poison = out_dir / "images" / "page_0_99.jpg"
+            poison.parent.mkdir(parents=True, exist_ok=True)
+            poison.write_bytes(b"partial multi output")
+            if self.cancel_on_multi_loop:
+                cancel.set()
+            raise RepetitiveOutputError("모의 의미 반복")
+        return super().run_multi(image_paths, out_dir, sink, cancel)
+
+    def run_single(self, image_path, out_dir, sink, cancel):
+        page = self._page_number(image_path)
+        self.single_calls[page] = self.single_calls.get(page, 0) + 1
+        if page in self.loop_single_pages:
+            self._write_single_poison(out_dir)
+            raise RepetitiveOutputError(f"{page}페이지 모의 의미 반복")
+        if page in self.fail_single_pages or (
+            page in self.fail_single_once_pages and self.single_calls[page] == 1
+        ):
+            self._write_single_poison(out_dir)
+            raise RuntimeError(f"{page}페이지 모의 실패")
         return super().run_single(image_path, out_dir, sink, cancel)
 
 
@@ -120,3 +179,78 @@ def test_per_page_mode_failed_page_placeholder(tmp_path):
     assert md.count(FAILED_MARK) == 1
     assert "![](images/p0002_0.jpg)" in md
     assert len(job.warnings) == 1 and "1페이지" in job.warnings[0]
+
+
+def test_repetitive_multi_chunk_falls_back_to_single_pages(tmp_path):
+    engine = LoopFallbackEngine()
+    job = _run_job(tmp_path, engine, pages=4, pages_per_chunk=2)
+
+    assert job.status == "done"
+    assert engine.multi_calls == 2  # 반복 난 청크는 같은 multi로 재시도하지 않음
+    assert engine.single_calls == {1: 1, 2: 1}
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert len(md.split("\n\n---\n\n")) == 4
+    for page in range(1, 5):
+        assert f"![](images/p{page:04d}_0.jpg)" in md
+    assert not (job.dir / "images" / "p0001_99.jpg").exists()
+    assert any("반복 출력 감지로 페이지별 재처리" in warning for warning in job.warnings)
+
+
+def test_single_fallback_failure_only_replaces_that_page(tmp_path):
+    engine = LoopFallbackEngine(fail_single_pages={2})
+    job = _run_job(tmp_path, engine, pages=4, pages_per_chunk=2)
+
+    assert job.status == "done"
+    assert engine.single_calls == {1: 1, 2: 2}
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert md.count(FAILED_MARK) == 1
+    assert "![](images/p0001_0.jpg)" in md
+    assert "![](images/p0003_0.jpg)" in md
+    assert "![](images/p0004_0.jpg)" in md
+    assert "![](images/p0002_0.jpg)" not in md
+    assert not (job.dir / "images" / "p0002_99.jpg").exists()
+    assert not (job.dir / "layout" / "page_0002.jpg").exists()
+    layout = json.loads((job.dir / "layout.json").read_text(encoding="utf-8"))
+    assert 2 not in {page["page"] for page in layout}
+
+
+def test_single_fallback_retry_discards_first_attempt_artifacts(tmp_path):
+    engine = LoopFallbackEngine(fail_single_once_pages={2})
+    job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=2)
+
+    assert job.status == "done"
+    assert engine.single_calls == {1: 1, 2: 2}
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert FAILED_MARK not in md
+    assert "![](images/p0002_0.jpg)" in md
+    assert not (job.dir / "images" / "p0002_99.jpg").exists()
+
+
+def test_all_single_fallback_pages_failed_keeps_all_failed_contract(tmp_path):
+    engine = LoopFallbackEngine(fail_single_pages={1, 2})
+    job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=2)
+
+    assert job.status == "error"
+    assert "모든 청크" in job.error
+    assert engine.multi_calls == 1
+    assert engine.single_calls == {1: 2, 2: 2}
+
+
+def test_per_page_repetition_retries_without_recursive_fallback(tmp_path):
+    engine = LoopFallbackEngine(loop_single_pages={1})
+    job = _run_job(tmp_path, engine, pages=2, mode="per_page")
+
+    assert job.status == "done"
+    assert engine.multi_calls == 0
+    assert engine.single_calls == {1: 2, 2: 1}
+    md = (job.dir / "result.md").read_text(encoding="utf-8")
+    assert md.count(FAILED_MARK) == 1
+
+
+def test_cancel_wins_over_multi_repetition_fallback(tmp_path):
+    engine = LoopFallbackEngine(cancel_on_multi_loop=True)
+    job = _run_job(tmp_path, engine, pages=2, pages_per_chunk=2)
+
+    assert job.status == "canceled"
+    assert engine.multi_calls == 1
+    assert engine.single_calls == {}

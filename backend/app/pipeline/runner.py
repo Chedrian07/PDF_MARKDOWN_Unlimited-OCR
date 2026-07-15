@@ -7,9 +7,9 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
-from ..engine.base import EngineError, JobCanceled, OCREngine
+from ..engine.base import EngineError, JobCanceled, OCREngine, RepetitiveOutputError
 from .merge import ChunkResult, IncrementalMerger
 from .pdf import render_pdf_pages
 
@@ -175,6 +175,112 @@ def execute_job(
                     return engine.run_single(chunk[0], work_dir, sink, cancel)
                 return engine.run_multi(chunk, work_dir, sink, cancel)
 
+            def _run_with_retry(
+                run: Callable[[], str],
+                context: str,
+                *,
+                retry_repetitive: bool = True,
+                reset_output: Callable[[], None] | None = None,
+            ) -> str:
+                """엔진 호출을 1회 재시도하되 multi 의미 반복은 호출자에게 넘긴다."""
+                try:
+                    return run()
+                except JobCanceled:
+                    raise
+                except RepetitiveOutputError as error:
+                    if cancel.is_set():
+                        raise JobCanceled() from None
+                    if not retry_repetitive:
+                        raise
+                    first_error = error
+                except Exception as error:  # noqa: BLE001 — 청크 단위 격리
+                    first_error = error
+
+                logger.warning(
+                    "%s 실패 (%s: %s) — 캐시 해제 후 1회 재시도",
+                    context,
+                    first_error.__class__.__name__,
+                    str(first_error)[:200],
+                )
+                _empty_device_cache()
+                if cancel.is_set():
+                    raise JobCanceled() from None
+                if reset_output is not None:
+                    reset_output()
+                try:
+                    return run()
+                except JobCanceled:
+                    raise
+                except Exception as retry_error:  # noqa: BLE001 — 청크 단위 격리
+                    if cancel.is_set():
+                        raise JobCanceled() from None
+                    logger.warning(
+                        "%s 재시도 실패 (%s: %s)",
+                        context,
+                        retry_error.__class__.__name__,
+                        str(retry_error)[:200],
+                    )
+                    raise
+
+            def _recover_repetitive_chunk(
+                repetition_error: RepetitiveOutputError,
+            ) -> tuple[bool, Exception]:
+                """오염된 multi 산출물을 버리고 원본 페이지를 single로 격리 재처리."""
+                if cancel.is_set():
+                    raise JobCanceled()
+                end_page = start_page + len(chunk) - 1
+                span = (
+                    f"{start_page}페이지"
+                    if len(chunk) == 1
+                    else f"{start_page}–{end_page}페이지"
+                )
+                logger.warning(
+                    "%s multi OCR 반복 출력 감지 — 페이지별 재처리: %s",
+                    span,
+                    str(repetition_error)[:200],
+                )
+                merger.warnings.append(
+                    f"{span}: 반복 출력 감지로 페이지별 재처리 ({str(repetition_error)[:200]})"
+                )
+
+                # multi와 single은 이미지/레이아웃 파일명 규약이 다르다. 부분 multi
+                # 결과를 병합하지 않도록 제거하고 페이지마다 독립 디렉터리를 쓴다.
+                shutil.rmtree(work_dir, ignore_errors=True)
+                failed_pages = 0
+                last_error: Exception = repetition_error
+                for local_page, image_path in enumerate(chunk):
+                    if cancel.is_set():
+                        raise JobCanceled()
+                    global_page = start_page + local_page
+                    page_dir = work_dir / "fallback" / f"page_{local_page:02d}"
+
+                    def _run_page() -> str:
+                        sink.set_chunk(global_page)
+                        return engine.run_single(image_path, page_dir, sink, cancel)
+
+                    try:
+                        page_md = _run_with_retry(
+                            _run_page,
+                            f"{global_page}페이지 fallback OCR",
+                            reset_output=lambda directory=page_dir: shutil.rmtree(
+                                directory, ignore_errors=True
+                            ),
+                        )
+                    except JobCanceled:
+                        raise
+                    except Exception as page_error:  # noqa: BLE001 — 페이지 단위 격리
+                        failed_pages += 1
+                        last_error = page_error
+                        shutil.rmtree(page_dir, ignore_errors=True)
+                        _add_failed_chunk(
+                            merger, page_dir, global_page, 1, True, page_error
+                        )
+                    else:
+                        merger.add_chunk(
+                            ChunkResult(page_dir, global_page, 1, page_md, single=True)
+                        )
+                return failed_pages == len(chunk), last_error
+
             # 청크 단위 격리: 한 청크가 죽어도(OOM·벤더 예외 등) 잡 전체를 죽이지
             # 않는다 — 캐시 해제 후 1회 재시도, 그래도 실패하면 플레이스홀더로
             # 보정하고 계속. 취소(JobCanceled)는 절대 삼키지 않고 그대로 전파.
@@ -182,27 +288,46 @@ def execute_job(
             # 재시도에 포함하면 병합 도중 실패 시 페이지가 중복 병합될 수 있다.
             md: str | None = None
             try:
-                md = _run_engine()
+                md = _run_with_retry(
+                    _run_engine,
+                    f"청크 {ci + 1}/{len(chunks)}",
+                    retry_repetitive=job.mode == "per_page",
+                    reset_output=lambda: shutil.rmtree(work_dir, ignore_errors=True),
+                )
             except JobCanceled:
                 raise
-            except Exception as e:  # noqa: BLE001 — 청크 단위 격리
-                logger.warning("청크 %d/%d 실패 (%s: %s) — 캐시 해제 후 1회 재시도",
-                               ci + 1, len(chunks), e.__class__.__name__, str(e)[:200])
-                _empty_device_cache()
-                if cancel.is_set():
-                    raise JobCanceled() from None
-                try:
-                    md = _run_engine()
-                except JobCanceled:
-                    raise
-                except Exception as e2:  # noqa: BLE001
-                    logger.warning("청크 %d/%d 재시도 실패 (%s: %s) — 플레이스홀더로 보정 후 계속",
-                                   ci + 1, len(chunks), e2.__class__.__name__, str(e2)[:200])
+            except RepetitiveOutputError as repetition_error:
+                if job.mode != "per_page":
+                    all_failed, last_error = _recover_repetitive_chunk(repetition_error)
+                    if all_failed:
+                        failed_chunks += 1
+                        last_chunk_error = last_error
+                else:
                     failed_chunks += 1
-                    last_chunk_error = e2
+                    last_chunk_error = repetition_error
+                    shutil.rmtree(work_dir, ignore_errors=True)
                     _add_failed_chunk(
-                        merger, work_dir, start_page, len(chunk), job.mode == "per_page", e2
+                        merger, work_dir, start_page, len(chunk), True, repetition_error
                     )
+            except Exception as chunk_error:  # noqa: BLE001 — 청크 단위 격리
+                logger.warning(
+                    "청크 %d/%d 최종 실패 (%s: %s) — 플레이스홀더로 보정 후 계속",
+                    ci + 1,
+                    len(chunks),
+                    chunk_error.__class__.__name__,
+                    str(chunk_error)[:200],
+                )
+                failed_chunks += 1
+                last_chunk_error = chunk_error
+                shutil.rmtree(work_dir, ignore_errors=True)
+                _add_failed_chunk(
+                    merger,
+                    work_dir,
+                    start_page,
+                    len(chunk),
+                    job.mode == "per_page",
+                    chunk_error,
+                )
             if md is not None:
                 # 병합은 엔진 성공 시 1회만 — 병합 실패는 잡 레벨 IO 오류로 취급한다.
                 merger.add_chunk(

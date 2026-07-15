@@ -1,2 +1,8 @@
-from .base import EngineError, JobCanceled, OCREngine, StreamSink  # noqa: F401
+from .base import (  # noqa: F401
+    EngineError,
+    JobCanceled,
+    OCREngine,
+    RepetitiveOutputError,
+    StreamSink,
+)
 from .registry import build_engine  # noqa: F401
