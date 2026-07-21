@@ -48,6 +48,12 @@ class Job:
     error: str | None = None
     warnings: list[str] = field(default_factory=list)
     delete_requested: bool = False
+    # 변환에 사용된 엔진/모델 메타 — 완료 후에도 어떤 모델로 변환했는지 확인 가능.
+    # 구버전 meta.json에는 없으므로 복원 시 None 허용 (필드 부재 = 알 수 없음).
+    engine: str | None = None
+    model_id: str | None = None
+    model_revision: str | None = None
+    provider: str | None = None
 
     def _result_block(self) -> dict | None:
         if self.status != "done":
@@ -89,6 +95,11 @@ class Job:
             "error": self.error,
             "warnings": list(self.warnings),
             "result": self._result_block(),
+            # 신규 필드(추가만 — 기존 필드 의미 불변). 구 잡은 null.
+            "engine": self.engine,
+            "model_id": self.model_id,
+            "model_revision": self.model_revision,
+            "provider": self.provider,
         }
         # 선택 필드 — queued 잡에만 존재(계약). running/터미널 잡은 필드 자체가 없다.
         if queue_position is not None:
@@ -106,6 +117,10 @@ class Job:
             "progress": self.progress,
             "error": self.error,
             "warnings": self.warnings,
+            "engine": self.engine,
+            "model_id": self.model_id,
+            "model_revision": self.model_revision,
+            "provider": self.provider,
         }
 
 
@@ -116,11 +131,18 @@ class JobStore:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.RLock()
 
-    def create(self, filename: str, mode: str, dpi: int) -> Job:
+    def create(
+        self, filename: str, mode: str, dpi: int, engine_info: dict | None = None
+    ) -> Job:
         job_id = f"j_{uuid.uuid4().hex[:12]}"
         job_dir = self.jobs_dir / job_id
         job_dir.mkdir(parents=True)
         job = Job(id=job_id, filename=filename, mode=mode, dpi=dpi, dir=job_dir)
+        if engine_info:
+            job.engine = engine_info.get("engine")
+            job.model_id = engine_info.get("model_id")
+            job.model_revision = engine_info.get("model_revision")
+            job.provider = engine_info.get("provider")
         with self._lock:
             self._jobs[job_id] = job
         self.save(job)
@@ -226,6 +248,9 @@ class JobStore:
                     created_at=m.get("created_at", _now_iso()),
                     progress=m.get("progress") or _default_progress(),
                     error=m.get("error"), warnings=m.get("warnings") or [],
+                    # 구버전 meta.json에는 없는 필드 — 없으면 None으로 안전 복원
+                    engine=m.get("engine"), model_id=m.get("model_id"),
+                    model_revision=m.get("model_revision"), provider=m.get("provider"),
                 )
                 changed = job.status in ("queued", "running")
                 if changed:

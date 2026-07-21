@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import abc
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -40,6 +41,28 @@ class NullSink:
         pass
 
 
+@dataclass(frozen=True)
+class EngineCapabilities:
+    """엔진 메타데이터·능력 선언 — runner의 청크 크기 결정과 health/Job 메타에 쓰인다.
+
+    기본값은 기존 Unlimited-OCR 의미를 보존한다(하위 호환): 멀티페이지 문맥 지원,
+    토큰 단위 스트리밍, 완전한 layout. 페이지 단위 sidecar 엔진은 이를 오버라이드한다.
+
+    - preferred_chunk_size: None이면 settings.pages_per_chunk 사용.
+    - stream_granularity: "token"(생성 토큰 델타) | "page"(페이지 완료 시 일괄).
+    - layout_capability: "full"(텍스트+figure bbox) | "figure_only" | "none".
+    """
+
+    model_id: str = ""
+    model_revision: str = ""
+    provider: str = "in-process"
+    supports_multi_page: bool = True
+    preferred_chunk_size: int | None = None
+    stream_granularity: str = "token"
+    layout_capability: str = "full"
+    figure_capability: bool = True
+
+
 class OCREngine(abc.ABC):
     name: str = "base"
     device: str = "cpu"
@@ -48,6 +71,21 @@ class OCREngine(abc.ABC):
     @property
     @abc.abstractmethod
     def loaded(self) -> bool: ...
+
+    def capabilities(self) -> EngineCapabilities:
+        """기본값 = 기존 Unlimited 의미 — fake/기존 테스트가 깨지지 않는다."""
+        return EngineCapabilities()
+
+    def provider_health(self) -> dict | None:
+        """외부 provider(sidecar) 상태 — in-process 엔진은 None."""
+        return None
+
+    def drain_warnings(self) -> list[str]:
+        """직전 실행에서 쌓인 사용자 노출용 경고를 꺼내고 비운다 (기본: 없음).
+
+        runner가 청크마다 호출해 잡 warnings에 합친다 — 정화/절단으로 내용이
+        빠졌는데 잡이 조용히 'done'이 되는 것을 막는다."""
+        return []
 
     @abc.abstractmethod
     def load(self) -> None:

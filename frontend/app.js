@@ -359,6 +359,11 @@ const state = {
   // /api/health 스냅샷 — 필드 부재·미수신 시 undefined (검증·비활성은 fail-open)
   maxUploadMb: undefined,
   translateAvailable: undefined,
+  // 엔진 capability 스냅샷 (신규 health 계약 — 구버전 서버는 undefined 유지)
+  healthEngine: undefined,        // 현재 활성 엔진 이름 ('unlimited'|'ovisocr2'|…)
+  streamGranularity: undefined,   // 'token' | 'page'
+  layoutCapability: undefined,    // 'full' | 'figure_only' | 'none'
+  currentJobEngine: undefined,    // 열린 잡의 engine 메타 (구 잡은 undefined)
   // raw stream pane
   streamPending: '',
   streamPageNo: 0, // markers seen by the raw pane — divider k reads "페이지 k"
@@ -442,6 +447,9 @@ const EL_IDS = {
   jobChip: 'job-status-chip',
   jobFilename: 'job-filename',
   jobTime: 'job-time',
+  jobModel: 'job-model',
+  streamModeChip: 'stream-mode-chip',
+  doclayoutNote: 'doclayout-note',
   jobStop: 'job-stop',
   jobStopLabel: 'job-stop-label',
   jobDelete: 'job-delete',
@@ -622,6 +630,48 @@ function shortenGpu(name) {
     .replace(/^Apple\s+/i, '').trim();
 }
 
+// health 응답에서 엔진 capability를 추출하는 순수 코어 (tests에서 직접 검증).
+// 구버전 서버(capabilities 부재)는 모두 undefined — 소비처는 기존 UI 그대로 동작.
+export function healthCapabilities(d) {
+  const caps = (d && d.capabilities && typeof d.capabilities === 'object') ? d.capabilities : {};
+  return {
+    engine: (d && typeof d.engine === 'string') ? d.engine : undefined,
+    streamGranularity: typeof caps.stream_granularity === 'string' ? caps.stream_granularity : undefined,
+    layoutCapability: typeof caps.layout === 'string' ? caps.layout : undefined,
+  };
+}
+
+// sidecar provider 장애 요약 (순수). 문제 없으면 null.
+// 메인 앱 health가 200이어도 provider가 죽어 있으면 사용자에게 알린다.
+export function providerIssue(d) {
+  if (!d || d.provider !== 'local-sidecar') return null;
+  const ph = d.provider_health;
+  if (!ph || typeof ph !== 'object' || ph.status === 'ok') return null;
+  return String(ph.error || ph.status || '알 수 없음');
+}
+
+// 잡 헤더 모델 칩 데이터 (순수). 구버전 잡(메타 없음)은 null → 칩 숨김.
+export function jobModelChip(job) {
+  if (!job) return null;
+  const text = job.model_id || job.engine;
+  if (!text) return null;
+  const title = (job.model_id || '') +
+    (job.model_revision ? ` @ ${String(job.model_revision).slice(0, 8)}` : '') +
+    (job.engine ? ` · engine: ${job.engine}` : '') +
+    (job.provider ? ` · ${job.provider}` : '');
+  return { text, title };
+}
+
+// 레이아웃 탭 한계 안내 (순수). **그 잡을 실제로 변환한 엔진**이 현재 엔진이고
+// 그 엔진이 figure_only일 때만 문구를 낸다. 엔진 메타가 없는 잡(이 기능 이전에
+// 변환된 구 잡 = 항상 full layout 엔진)이나 다른 엔진의 잡에는 붙이지 않는다 —
+// 거짓 안내보다 무표시가 안전하다.
+export function docLayoutNoteFor(layoutCapability, jobEngine, healthEngine) {
+  if (layoutCapability !== 'figure_only') return null;
+  if (!jobEngine || jobEngine !== healthEngine) return null;
+  return '현재 엔진은 figure 위치만 제공합니다 — 레이아웃 뷰에는 그림 블록만 표시되고 텍스트 배치는 재구성되지 않습니다.';
+}
+
 async function loadHealth() {
   clearTimeout(state.healthTimer);
   let data;
@@ -645,11 +695,22 @@ function renderHealth(d) {
   state.translateAvailable = typeof d.translate_available === 'boolean' ? d.translate_available : undefined;
   applyTranslateAvailability(); // 잡 뷰가 열려 있는 동안의 health 갱신도 버튼에 반영
 
+  // 엔진 capability (신규 계약 — 필드 부재는 undefined = 기존 UI 그대로)
+  const hc = healthCapabilities(d);
+  state.healthEngine = hc.engine;
+  state.streamGranularity = hc.streamGranularity;
+  state.layoutCapability = hc.layoutCapability;
+  applyStreamModeChip();
+  applyDocLayoutNote();
+
   const c = el.healthBadges;
   c.textContent = '';
 
   const modelId = d.model_id || 'baidu/Unlimited-OCR';
-  c.appendChild(h('span', { class: 'badge badge-model', title: modelId },
+  const modelTitle = modelId +
+    (d.model_revision ? ` @ ${String(d.model_revision).slice(0, 8)}` : '') +
+    (d.provider ? ` · ${d.provider}` : '');
+  c.appendChild(h('span', { class: 'badge badge-model', title: modelTitle },
     h('span', { class: 'badge-ico', html: ICON.chip }),
     h('span', { text: modelId }),
   ));
@@ -678,6 +739,23 @@ function renderHealth(d) {
     }, 'FAKE 엔진'));
   }
 
+  // sidecar provider 상태 — 죽어 있으면 명확한 배지 (메인 앱 health는 200이어도)
+  const pIssue = providerIssue(d);
+  if (pIssue) {
+    c.appendChild(h('span', {
+      class: 'badge badge-error',
+      title: '엔진 서버(sidecar)에 연결할 수 없습니다: ' + pIssue,
+    }, '엔진 서버 연결 안 됨'));
+  }
+
+  // 페이지 단위 스트리밍 엔진 안내 (Unlimited의 토큰 스트리밍과 구분)
+  if (state.streamGranularity === 'page') {
+    c.appendChild(h('span', {
+      class: 'badge badge-page-stream',
+      title: '이 엔진은 페이지가 완료될 때마다 결과를 일괄 표시합니다 (토큰 스트리밍 아님)',
+    }, '페이지 단위'));
+  }
+
   if (d.model_loaded === false) {
     c.appendChild(h('span', {
       class: 'badge badge-loading',
@@ -692,6 +770,28 @@ function renderHealthError() {
     class: 'badge badge-error',
     title: '서버 상태를 확인할 수 없습니다. 자동으로 재시도합니다.',
   }, '서버 연결 실패'));
+}
+
+// 페이지 단위 스트리밍 엔진이면 라이브 뷰 요약에 안내 칩 표시
+function applyStreamModeChip() {
+  if (!el.streamModeChip) return;
+  el.streamModeChip.hidden = state.streamGranularity !== 'page';
+}
+
+// layout capability가 figure_only인 엔진의 잡에는 레이아웃 탭에 한계 안내를 붙인다.
+// 열린 잡의 엔진과 현재 활성 엔진이 다르면(엔진 전환 후 옛 잡 열람) 단정할 수
+// 없으므로 표시하지 않는다 — 거짓 안내보다 무표시가 안전.
+function applyDocLayoutNote() {
+  if (!el.doclayoutNote) return;
+  const relevant = docLayoutNoteFor(
+    state.layoutCapability, state.currentJobEngine, state.healthEngine,
+  );
+  if (relevant !== null) {
+    el.doclayoutNote.textContent = relevant;
+    el.doclayoutNote.hidden = false;
+  } else {
+    el.doclayoutNote.hidden = true;
+  }
 }
 
 /* ============================ Job history ============================ */
@@ -966,6 +1066,21 @@ function renderJob(job) {
   el.jobFilename.title = job.filename || '';
   el.jobTime.textContent = job.created_at ? fmtTime(job.created_at) : '';
   updateHeaderChip(job.status);
+
+  // 잡의 엔진/모델 메타 칩 — 완료 후에도 어떤 모델로 변환했는지 확인 가능.
+  // 구버전 잡(필드 없음)은 칩 자체를 숨긴다.
+  state.currentJobEngine = typeof job.engine === 'string' ? job.engine : undefined;
+  const modelChip = jobModelChip(job);
+  if (el.jobModel) {
+    if (modelChip) {
+      el.jobModel.textContent = modelChip.text;
+      el.jobModel.title = modelChip.title;
+      el.jobModel.hidden = false;
+    } else {
+      el.jobModel.hidden = true;
+    }
+  }
+  applyDocLayoutNote();
 
   const running = job.status === 'queued' || job.status === 'running';
   const done = job.status === 'done';

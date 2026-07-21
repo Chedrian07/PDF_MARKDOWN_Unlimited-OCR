@@ -194,12 +194,19 @@ def _translate_available() -> bool:
 def health(request: Request) -> dict:
     st = _state(request)
     engine = st.engine
+    caps = engine.capabilities()
+    # provider_health는 sidecar 엔진만 non-None. sidecar가 죽어 있어도 메인 앱
+    # health는 200이어야 한다 — provider 상태는 provider_health.status로 구분.
+    try:
+        provider = engine.provider_health()
+    except Exception as e:  # noqa: BLE001 — health가 500으로 죽지 않게
+        provider = {"status": "error", "error": str(e)[:300]}
     return {
         "status": "ok",
         "engine": engine.name,
         "device": engine.device,
         "dtype": engine.dtype_name or st.settings.dtype,
-        "model_id": st.settings.model_id,
+        "model_id": caps.model_id or st.settings.model_id,
         "model_loaded": engine.loaded,
         # 프리로드 실패 후 워커 재시도가 성공하면 과거 오류는 더 이상 유효하지 않다
         "model_load_error": None if engine.loaded else st.load_state.get("error"),
@@ -207,6 +214,16 @@ def health(request: Request) -> dict:
         "native_ops": native_ops.HAVE_NATIVE,
         "max_upload_mb": st.settings.max_upload_mb,
         "translate_available": _translate_available(),
+        # ── 신규 필드 (추가만 — 기존 필드 의미 불변) ──
+        "model_revision": caps.model_revision or None,
+        "provider": caps.provider,
+        "capabilities": {
+            "multi_page_context": caps.supports_multi_page,
+            "stream_granularity": caps.stream_granularity,
+            "layout": caps.layout_capability,
+            "figures": caps.figure_capability,
+        },
+        "provider_health": provider,
     }
 
 
@@ -229,7 +246,16 @@ async def create_job(
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(400, "PDF 파일만 업로드할 수 있습니다")
 
-    job = st.store.create(filename=filename, mode=mode, dpi=dpi)
+    caps = st.engine.capabilities()
+    job = st.store.create(
+        filename=filename, mode=mode, dpi=dpi,
+        engine_info={
+            "engine": st.engine.name,
+            "model_id": caps.model_id or settings.model_id,
+            "model_revision": caps.model_revision or None,
+            "provider": caps.provider,
+        },
+    )
     dest = job.dir / "source.pdf"
     size = 0
     try:
@@ -501,6 +527,10 @@ def job_archive(request: Request, job_id: str) -> FileResponse:
                 md = job.dir / "result.md"
                 if md.is_file():
                     zf.write(md, "result.md")
+                # 변환 메타(엔진/모델/경고)도 동봉 — 어떤 모델로 변환했는지 아카이브만으로 확인 가능
+                meta = job.dir / "meta.json"
+                if meta.is_file():
+                    zf.write(meta, "meta.json")
                 # 번역본(result.ko.md 등)도 포함 — 번역 완료 시 이 zip 캐시가 삭제돼
                 # 다음 요청에서 번역본까지 담아 재생성된다. (glob은 result.md 자신은 제외)
                 for extra in sorted(job.dir.glob("result.*.md")):

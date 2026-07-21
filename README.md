@@ -2,9 +2,26 @@
 
 [![CI](https://github.com/Chedrian07/PDF_MARKDOWN_Unlimited-OCR/actions/workflows/ci.yml/badge.svg)](https://github.com/Chedrian07/PDF_MARKDOWN_Unlimited-OCR/actions/workflows/ci.yml) — push/PR마다 backend pytest·ruff·frontend·native 패리티 테스트를 실행합니다.
 
-웹에서 PDF를 업로드하면 [baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR)
-(3.3B MoE 비전-언어 모델, MIT)로 **이미지(figure)까지 추출된 Markdown**을 만들어 주는
-셀프호스팅 서비스입니다.
+웹에서 PDF를 업로드하면 로컬 비전-언어 OCR 모델로 **이미지(figure)까지 추출된
+Markdown**을 만들어 주는 셀프호스팅 서비스입니다. 기본 엔진은
+[baidu/Unlimited-OCR](https://huggingface.co/baidu/Unlimited-OCR)(3.3B MoE, MIT)이고,
+단일 RTX 5070 Ti(16GB) 기준으로 **엔진을 선택**할 수 있습니다:
+
+| 엔진 | 선택 기준 | 실행 |
+|---|---|---|
+| **Unlimited-OCR** (기본) | 멀티페이지 문맥 · 실시간 토큰 스트리밍 | `docker compose up -d --build ocr-cuda` → :8001 |
+| **OvisOCR2** (0.9B, Apache-2.0) | 속도(워밍업 후 ~1.1s/p) · figure bbox | `docker compose --profile ovis up -d --build ovisocr2 ocr-ovis` → :8002 |
+| **PaddleOCR-VL-1.6** (0.9B, Apache-2.0) | **한국어 정확도** · 표/수식 · 완전한 layout | `docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle` → :8003 |
+
+> RTX 5070 Ti 실측 비교(속도·VRAM·한국어 오독 사례)는
+> [docs/OCR_BENCHMARK.md](docs/OCR_BENCHMARK.md) 참조 — 한국어 문서는
+> PaddleOCR-VL, 영문·속도 우선은 OvisOCR2가 유리했습니다.
+
+⚠ **한 시점에 GPU 스택 하나만** 기동하세요 (단일 16GB GPU — VRAM 경쟁 시 OOM).
+신규 엔진은 GPU 전용 sidecar 컨테이너로 격리되어 메인 backend의 Python 환경을
+오염시키지 않습니다. 상세: [docs/CUDA_5070TI_MULTI_OCR_PLAN.md](docs/CUDA_5070TI_MULTI_OCR_PLAN.md) ·
+[docs/OVISOCR2_CUDA_5070TI.md](docs/OVISOCR2_CUDA_5070TI.md) ·
+[docs/PADDLEOCR_VL_BLACKWELL_5070TI.md](docs/PADDLEOCR_VL_BLACKWELL_5070TI.md)
 
 - **PDF 속 이미지 완벽 처리**: 모델의 그라운딩 박스(`<|ref|>image<|/ref|><|det|>…`)로
   figure를 원본에서 크롭해 `images/`에 저장하고 마크다운에 `![](images/…)`로 연결
@@ -26,6 +43,12 @@ docker compose up -d --build
 # CUDA (NVIDIA GPU + nvidia container toolkit 필요)
 docker compose up -d --build ocr-cuda   # 서비스명 지정 → cuda 프로필 자동 활성화
 # → http://localhost:8001
+
+# 신규 CUDA 엔진 (RTX 5070 Ti — GPU 스택은 한 번에 하나만!)
+python scripts/check_cuda_environment.py               # preflight (드라이버/sm_120/docker GPU)
+docker compose --profile ovis up -d --build ovisocr2 ocr-ovis   # → http://localhost:8002
+docker compose stop ovisocr2 ocr-ovis                          # 전환 전 반드시 정지
+docker compose --profile paddle up -d --build paddleocr-vl ocr-paddle  # → http://localhost:8003
 ```
 
 - 최초 실행 시 모델 가중치(~6.7GB)를 `hf-cache` 볼륨에 1회 다운로드합니다
@@ -96,6 +119,15 @@ OCR_DEVICE=metal uv run uvicorn app.main:app   # http://localhost:8000
 cd backend && uv run python ../scripts/make_sample_pdf.py ../sample/sample.pdf && cd ..
 ./scripts/smoke_e2e.sh                      # CPU (8000)
 ./scripts/smoke_e2e.sh http://localhost:8001  # CUDA (8001)
+
+# 신규 엔진 실 GPU smoke (RTX 5070 Ti — 해당 프로필 기동 후)
+cd backend
+uv run python ../scripts/smoke_ovisocr2_5070ti.py        # ovis 프로필 (:8002)
+uv run python ../scripts/smoke_paddleocr_vl_5070ti.py    # paddle 프로필 (:8003)
+
+# 엔진 비교 벤치마크 (스택을 하나씩 띄워 순차 실행 — benchmark_docs/README.md)
+uv run python ../scripts/benchmark_ocr_engines.py \
+  --endpoint ovis=http://127.0.0.1:8002 --input ../benchmark_docs/ --out ../bench_out/
 ```
 
 ## 로컬 개발 (uv)
@@ -118,7 +150,8 @@ npm test --prefix frontend
 ```
 
 환경변수 전체 목록: [docs/ARCHITECTURE.md §7](docs/ARCHITECTURE.md) —
-`OCR_DEVICE`(cpu/cuda/metal), `OCR_DTYPE`, `OCR_ENGINE`(unlimited/fake),
+`OCR_DEVICE`(cpu/cuda/metal), `OCR_DTYPE`,
+`OCR_ENGINE`(unlimited/fake/ovisocr2/paddleocr_vl), `OCR_SIDECAR_URL`,
 `PAGES_PER_CHUNK`, `RENDER_DPI`, `MAX_UPLOAD_MB` 등.
 
 ## 동작 방식

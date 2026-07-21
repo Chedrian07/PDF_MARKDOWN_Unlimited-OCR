@@ -1,0 +1,79 @@
+{
+  "res": {
+    "input_path": "page_0001.png",
+    "page_index": null,
+    "model_settings": {"use_doc_preprocessor": false, "use_layout_detection": true},
+    "layout_det_res": {
+      "boxes": [
+        {"cls_id": 1, "label": "doc_title", "score": 0.98, "coordinate": [90.5, 60.2, 1150.0, 130.8]},
+        {"cls_id": 2, "label": "text", "score": 0.97, "coordinate": [90.0, 160.0, 1150.0, 420.0]}
+      ]
+    },
+    "parsing_res_list": [
+      {
+        "block_bbox": [90.5, 60.2, 1150.0, 130.8],
+        "block_label": "doc_title",
+        "block_content": "2026년 상반기 연구 보고서 (硏究報告書)",
+        "block_id": 0,
+        "block_order": 1
+      },
+      {
+        "block_bbox": [90.0, 160.0, 1150.0, 420.0],
+        "block_label": "text",
+        "block_content": "본 문서는 한국어와 English가 혼용된 문단입니다. 한글 자모 ㄱㄴㄷ과 숫자 1,234.56 kg 단위, 그리고 漢字 혼용을 검증합니다.",
+        "block_id": 1,
+        "block_order": 2
+      },
+      {
+        "block_bbox": [90.0, 450.0, 1150.0, 780.0],
+        "block_label": "table",
+        "block_content": "<table><tr><th>항목</th><th>값</th></tr><tr><td>매출\n(분기)</td><td>1,234</td></tr><tr><td>비용</td><td>567</td></tr></table>",
+        "block_id": 2,
+        "block_order": 3
+      },
+      {
+        "block_bbox": [200.0, 820.0, 1040.0, 900.0],
+        "block_label": "formula",
+        "block_content": "\\sigma = \\sqrt{\\frac{1}{N}\\sum_{i=1}^{N}(x_i-\\mu)^2}",
+        "block_id": 3,
+        "block_order": 4
+      },
+      {
+        "block_bbox": [150.0, 940.0, 1090.0, 1380.0],
+        "block_label": "image",
+        "block_content": "",
+        "block_id": 4,
+        "block_order": 5
+      },
+      {
+        "block_bbox": [150.0, 1400.0, 620.0, 1600.0],
+        "block_label": "chart",
+        "block_content": "",
+        "block_id": 5,
+        "block_order": 6
+      },
+      {
+        "block_bbox": [90.0, 1630.0, 1150.0, 1680.0],
+        "block_label": "footnote",
+        "block_content": "1) 각주 내용은 markdown에서 제외되지만 레이아웃에는 보존됩니다.",
+        "block_id": 6,
+        "block_order": 7
+      },
+      {
+        "block_bbox": [560.0, 1700.0, 680.0, 1740.0],
+        "block_label": "number",
+        "block_content": "3",
+        "block_id": 7,
+        "block_order": 8
+      },
+      {
+        "block_bbox": [90.0, 10.0, 1150.0, 48.0],
+        "block_label": "header",
+        "block_content": "기밀 — 내부 배포용",
+        "block_id": 8,
+        "block_order": 0
+      }
+    ],
+    "markdown": {"text": "(공식 markdown dict — sidecar는 사용하지 않음)", "images": {}}
+  }
+}

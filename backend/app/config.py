@@ -49,6 +49,11 @@ def _env_int(name: str, default: int) -> int:
     return int(v) if v else default
 
 
+def _env_float(name: str, default: float) -> float:
+    v = os.environ.get(name)
+    return float(v) if v else default
+
+
 def _env_limit(name: str, default: int) -> int | None:
     """상한형 env — 0 이하는 비활성(None)으로 매핑한다.
 
@@ -85,6 +90,14 @@ class Settings:
     decode_block: int = 8               # fast_decode의 호스트 동기화 배칭 크기(토큰)
     fake_delay: float = 0.02            # FakeEngine 페이지당 지연(초)
     job_ttl_days: int = 0               # 터미널 잡(done/error/canceled) 자동 GC 보존 일수 — 0=비활성(opt-in)
+    # ── sidecar 엔진 (OCR_ENGINE=ovisocr2|paddleocr_vl) 공용 클라이언트 설정 ──
+    sidecar_url: str = ""               # 예: http://ovisocr2:8080 — sidecar 엔진 선택 시 필수
+    sidecar_connect_timeout_s: float = 10.0
+    sidecar_read_timeout_s: float = 600.0
+    sidecar_health_timeout_s: float = 5.0
+    sidecar_max_response_mb: int = 20   # /v1/parse 응답 크기 상한 (response bomb 방어)
+    sidecar_retries: int = 1            # 연결 수립 실패 시 재시도 횟수 (읽기 중 실패는 runner 재시도 몫)
+    remote_page_concurrency: int = 1    # sidecar 페이지 동시 요청 수(=sidecar 엔진의 청크 크기)
     # Host 헤더 화이트리스트 (DNS rebinding 방어) — 포트는 비교 시 무시됨 (localhost:8000 → localhost)
     allowed_hosts: list[str] = field(default_factory=lambda: _split_hosts(_DEFAULT_ALLOWED_HOSTS))
 
@@ -117,6 +130,13 @@ class Settings:
             fake_delay=float(os.environ.get("FAKE_DELAY", "0.02")),
             job_ttl_days=_env_int("JOB_TTL_DAYS", 0),
             allowed_hosts=_split_hosts(os.environ.get("ALLOWED_HOSTS") or _DEFAULT_ALLOWED_HOSTS),
+            sidecar_url=os.environ.get("OCR_SIDECAR_URL", "").strip().rstrip("/"),
+            sidecar_connect_timeout_s=_env_float("OCR_SIDECAR_CONNECT_TIMEOUT_S", 10.0),
+            sidecar_read_timeout_s=_env_float("OCR_SIDECAR_READ_TIMEOUT_S", 600.0),
+            sidecar_health_timeout_s=_env_float("OCR_SIDECAR_HEALTH_TIMEOUT_S", 5.0),
+            sidecar_max_response_mb=max(1, _env_int("OCR_SIDECAR_MAX_RESPONSE_MB", 20)),
+            sidecar_retries=max(0, _env_int("OCR_SIDECAR_RETRIES", 1)),
+            remote_page_concurrency=max(1, _env_int("OCR_REMOTE_PAGE_CONCURRENCY", 1)),
         )
 
     @property

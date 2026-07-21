@@ -1,0 +1,4 @@
+# OvisOCR2 sidecar 추가 의존성 — 베이스 이미지(vllm/vllm-openai:v0.22.1-cu129)에
+# 이미 있는 것(vllm==0.22.1, torch cu129, fastapi, uvicorn, pillow, pydantic)은
+# 재고정하지 않는다 (베이스와의 버전 충돌 방지). 여기는 이미지에 없는 것만.
+python-multipart==0.0.20

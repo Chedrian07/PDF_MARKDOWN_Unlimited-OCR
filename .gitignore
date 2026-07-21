@@ -31,3 +31,6 @@ hf-cache/
 
 # 로컬 환경 (API 키 포함 — 절대 커밋 금지)
 .env
+
+# smoke 테스트가 backend/에서 실행될 때 생기는 부산물
+backend/sample/

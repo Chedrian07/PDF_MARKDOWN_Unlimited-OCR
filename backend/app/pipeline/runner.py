@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 _TOKEN_FLUSH_CHARS = 256
 _TOKEN_FLUSH_SECS = 0.1
 _PAGE_MARKER = "<PAGE>"
+# 잡 단위 경고 상한 — 엔진 경고는 청크(기본 1페이지)마다 나올 수 있어 상한이 없으면
+# meta.json이 비대해지고 5초 주기 GET /api/jobs 응답까지 부풀린다.
+_MAX_JOB_WARNINGS = 200
+
+
+def _page_span(start_page: int, num_pages: int) -> str:
+    end = start_page + num_pages - 1
+    return f"{start_page}페이지" if num_pages == 1 else f"{start_page}–{end}페이지"
 
 
 class BrokerSink:
@@ -112,8 +120,7 @@ def _add_failed_chunk(
     else:
         md = "<PAGE>\n" + "\n<PAGE>\n".join([_FAILED_PAGE_MD] * num_pages)
     merger.add_chunk(ChunkResult(work_dir, start_page, num_pages, md, single=single))
-    end = start_page + num_pages - 1
-    span = f"{start_page}페이지" if num_pages == 1 else f"{start_page}–{end}페이지"
+    span = _page_span(start_page, num_pages)
     merger.warnings.append(
         f"{span}: 변환 실패로 플레이스홀더 삽입 ({err.__class__.__name__}: {str(err)[:200]})"
     )
@@ -130,6 +137,13 @@ def execute_job(
     sink = BrokerSink(job, store, broker)
     try:
         job.status = "running"
+        # 엔진/모델 메타 확정 — 업로드 시점에는 sidecar health(revision 등)를 모를 수
+        # 있으므로, 엔진이 로드된 실행 시작 시점에 실제 사용값으로 갱신한다.
+        start_caps = engine.capabilities()
+        job.engine = engine.name
+        job.model_id = start_caps.model_id or job.model_id
+        job.model_revision = start_caps.model_revision or job.model_revision
+        job.provider = start_caps.provider or job.provider
         job.progress.update(phase="render", current_page=0, chunk=0, total_chunks=0)
         store.save(job)
         broker.publish_progress(job)
@@ -150,12 +164,28 @@ def execute_job(
             raise JobCanceled()
 
         total = len(pages)
-        chunk_size = 1 if job.mode == "per_page" else settings.pages_per_chunk
+        caps = engine.capabilities()
+        if job.mode == "per_page":
+            chunk_size = 1
+        else:
+            # 엔진 capability가 청크 크기를 결정한다: 페이지 단위 sidecar 엔진은
+            # preferred_chunk_size(=OCR_REMOTE_PAGE_CONCURRENCY, 기본 1),
+            # Unlimited는 None → 기존 PAGES_PER_CHUNK.
+            chunk_size = caps.preferred_chunk_size or settings.pages_per_chunk
+        chunk_size = max(1, chunk_size)
         chunks = _chunked(pages, chunk_size)
         job.progress.update(total_pages=total, total_chunks=len(chunks), current_page=0)
         store.save(job)
 
         merger = IncrementalMerger(job.dir, settings.page_separator)
+        engine.drain_warnings()  # 이전 잡의 잔여 경고 폐기 (엔진은 잡 간 공유된다)
+        if job.mode != "per_page" and not caps.supports_multi_page:
+            # 페이지 단위 모델 안내 — 한 번만 기록 (multi를 선택해도 정상 처리되지만
+            # 내부적으로는 페이지별 추론이며 오류도 페이지 단위로 격리된다)
+            merger.warnings.append(
+                f"{engine.name} 엔진은 페이지 단위 모델이라 문서를 페이지별로 처리했습니다"
+                " (결과는 동일하게 하나의 Markdown으로 병합됨)"
+            )
 
         def _try_embedded_text_fallback(
             page_number: int,
@@ -261,12 +291,7 @@ def execute_job(
                 """반복/상한 초과 multi 산출물을 버리고 페이지별 single 재처리."""
                 if cancel.is_set():
                     raise JobCanceled()
-                end_page = start_page + len(chunk) - 1
-                span = (
-                    f"{start_page}페이지"
-                    if len(chunk) == 1
-                    else f"{start_page}–{end_page}페이지"
-                )
+                span = _page_span(start_page, len(chunk))
                 logger.warning(
                     "%s multi OCR 비정상 생성 감지 — 페이지별 재처리: %s",
                     span,
@@ -371,6 +396,21 @@ def execute_job(
                         job.mode == "per_page",
                         chunk_error,
                     )
+            # 엔진이 남긴 정화/절단 경고를 잡 warnings로 승격 — 내용이 빠졌는데
+            # 조용히 done이 되지 않게 한다 (sidecar 엔진의 bbox 폐기·상한 절단 등).
+            # 페이지 범위는 여기서 붙인다 (엔진은 전역 번호를 모른다).
+            span = _page_span(start_page, len(chunk))
+            for warning in engine.drain_warnings():
+                if len(merger.warnings) < _MAX_JOB_WARNINGS:
+                    merger.warnings.append(f"{span}: {warning}")
+                elif len(merger.warnings) == _MAX_JOB_WARNINGS:
+                    merger.warnings.append(
+                        f"경고가 {_MAX_JOB_WARNINGS}건을 넘어 이후 항목은 생략됩니다 "
+                        "(서버 로그에서 전체 확인)"
+                    )
+                    logger.warning("잡 %s: 경고 상한 도달 — 이후 경고는 로그에만 남습니다", job.id)
+                else:
+                    logger.warning("잡 %s 경고(생략됨): %s: %s", job.id, span, warning)
             if md is not None:
                 # 병합은 엔진 성공 시 1회만 — 병합 실패는 잡 레벨 IO 오류로 취급한다.
                 merger.add_chunk(

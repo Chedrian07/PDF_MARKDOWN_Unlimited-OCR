@@ -1,0 +1,11 @@
+# PaddleOCR-VL sidecar 의존성 고정 (paddlepaddle-gpu==3.3.1은 Dockerfile에서
+# 공식 cu129 인덱스로 별도 설치 — PyPI에 없는 인덱스라 여기 넣지 않는다).
+#
+# paddleocr 3.6.x = PaddleOCR-VL-1.6 동봉 버전 (paddlex[ocr,genai-client]>=3.6,<3.7 pin)
+paddleocr[doc-parser]==3.6.0
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20
+# revision 고정 스냅샷 다운로드에 직접 사용 (app/model.py::_pin_revision).
+# 값은 이 이미지가 실제로 해석한 버전 — 재빌드 재현성을 위해 정확히 고정한다.
+huggingface_hub==1.24.0

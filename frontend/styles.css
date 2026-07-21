@@ -440,6 +440,14 @@ input[type="number"]:focus-visible { border-color: var(--accent); outline: 2px s
 .chip-done { color: var(--ok); background: var(--ok-weak); border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
 .chip-error { color: var(--danger); background: var(--danger-weak); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
 .chip-canceled { color: var(--text-subtle); background: var(--bg-sunken); border-color: var(--border); }
+/* 잡 헤더의 엔진/모델 메타 칩 — 상태 점(::before) 없이 텍스트만 */
+.chip-model { color: var(--text-muted); background: var(--bg-sunken); border-color: var(--border); max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.chip-model::before { display: none; }
+/* 페이지 단위 스트리밍 엔진 안내 (라이브 요약·헤더 배지 공용 톤) */
+.chip-page-stream { color: var(--info); background: var(--info-weak); border-color: color-mix(in srgb, var(--info) 30%, transparent); }
+.chip-page-stream::before { display: none; }
+.badge-page-stream { color: var(--info); background: var(--info-weak); border-color: color-mix(in srgb, var(--info) 30%, transparent); }
+.doclayout-note { margin: 0 0 10px; font-size: 12.5px; }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 

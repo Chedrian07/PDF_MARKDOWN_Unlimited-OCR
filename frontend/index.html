@@ -156,6 +156,7 @@
             <span id="job-status-chip" class="chip"></span>
             <h2 id="job-filename" class="job-filename"></h2>
             <span id="job-time" class="muted"></span>
+            <span id="job-model" class="chip chip-model" hidden></span>
           </div>
           <div class="job-head-actions">
             <button id="job-stop" class="btn btn-stop" type="button" hidden>
@@ -187,6 +188,8 @@
             <span class="stream-dot" aria-hidden="true"></span>
             <span>라이브 진행</span>
             <span class="ls-hint muted">원본 · RAW · 미리보기</span>
+            <span id="stream-mode-chip" class="chip chip-page-stream" hidden
+                  title="이 엔진은 토큰 스트리밍 대신 페이지가 완료될 때마다 결과를 일괄 표시합니다">페이지 단위 갱신</span>
           </summary>
           <div class="live-grid">
             <section class="live-pane pane-source" aria-label="원본 페이지와 레이아웃 박스">
@@ -278,6 +281,7 @@
               <pre class="code-block md-raw"><code id="md-code"></code></pre>
             </div>
             <div class="tab-panel" role="tabpanel" data-panel="doclayout" hidden>
+              <p id="doclayout-note" class="muted doclayout-note" hidden></p>
               <div id="doclayout-body" class="doclayout-body"></div>
             </div>
             <div class="tab-panel" role="tabpanel" data-panel="layouts" hidden>

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..config import Settings
 from ..native_ops import make_ngram_logits_processor
-from .base import EngineError, OCREngine, RepetitiveOutputError, StreamSink
+from .base import EngineCapabilities, EngineError, OCREngine, RepetitiveOutputError, StreamSink
 from .repetition import SemanticRepetitionDetector
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,18 @@ class UnlimitedEngine(OCREngine):
     @property
     def loaded(self) -> bool:
         return self._model is not None
+
+    def capabilities(self) -> EngineCapabilities:
+        return EngineCapabilities(
+            model_id=self._settings.model_id,
+            model_revision=self._settings.model_revision,
+            provider="in-process",
+            supports_multi_page=True,
+            preferred_chunk_size=None,  # settings.pages_per_chunk 사용 (기존 동작)
+            stream_granularity="token",
+            layout_capability="full",
+            figure_capability=True,
+        )
 
     def load(self) -> None:
         # 프리로드 스레드(main)와 워커 스레드(jobs)가 동시에 진입할 수 있다 —
