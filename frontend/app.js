@@ -361,6 +361,7 @@ const state = {
   jobs: [],
   currentJobId: null,
   displayedStatus: null,
+  displayedPhase: null,   // 마지막 진행 phase — loading→render 전이에서 라이브 뷰 오픈 판정
   queuePos: null, // 열린 잡의 마지막 대기열 위치 — queued가 아니게 되면 해제
   selectedFiles: [], // 다중 선택 지원 — 검증을 통과한 파일들만 담긴다
   uploading: false, // 업로드 루프 재진입 가드 — 진행 중 새 선택이 버튼을 되살리지 않게
@@ -959,6 +960,7 @@ async function deleteJob(id) {
     teardownConnections();
     state.currentJobId = null;
     state.displayedStatus = null;
+    state.displayedPhase = null;
     showEmptyState();
     syncJobHash(null); // 삭제된 잡을 가리키는 해시 정리
   }
@@ -1026,6 +1028,7 @@ async function openJob(id) {
     }
   }
   state.displayedStatus = null;
+  state.displayedPhase = null;
   state.queuePos = null; // 이전 잡의 대기열 위치가 새 잡 칩에 새지 않도록
   state.previewLoaded = false;
   state.markdownLoaded = false;
@@ -1105,24 +1108,30 @@ function renderJob(job) {
   const done = job.status === 'done';
   const canceled = job.status === 'canceled';
   const failed = job.status === 'error';
+  // 모델 로딩 대기 단계는 아직 페이지가 렌더되지 않아 라이브 뷰(페이지 이미지)를
+  // 열면 404가 쏟아진다 — 진행바만 보여준다.
+  const loadingPhase = running && (job.progress || {}).phase === 'loading';
 
   el.progressSection.hidden = !running;
   el.resultSection.hidden = !(done || canceled);
   el.errorSection.hidden = !(failed || canceled);
-  el.liveDetails.hidden = !running && !hasLiveContent();
-  el.liveDetails.open = running;
+  el.liveDetails.hidden = (loadingPhase || !running) && !hasLiveContent();
+  el.liveDetails.open = running && !loadingPhase;
   setStopButton(job.status);
 
   if (running) {
     const p = job.progress || {};
+    state.displayedPhase = p.phase;
     updateProgress(p, job.status);
-    // A status snapshot goes through the same announce machine as SSE
-    // progress (phase-gated: an OCR snapshot seeds the page when opening a
-    // job mid-OCR; render/merge snapshots must not pin it).
-    const r = groundAnnounce(state.ground, p.phase, p.current_page, p.total_pages);
-    if (r.firstOcr && state.pageBoxes.size > 0) state.pageBoxes = new Map();
-    if (state.followLive) state.viewPage = state.ground.page;
-    updateLeftPane();
+    if (!loadingPhase) {
+      // A status snapshot goes through the same announce machine as SSE
+      // progress (phase-gated: an OCR snapshot seeds the page when opening a
+      // job mid-OCR; render/merge snapshots must not pin it).
+      const r = groundAnnounce(state.ground, p.phase, p.current_page, p.total_pages);
+      if (r.firstOcr && state.pageBoxes.size > 0) state.pageBoxes = new Map();
+      if (state.followLive) state.viewPage = state.ground.page;
+      updateLeftPane();
+    }
   }
   if (done) renderResult(job);
   if (canceled) {
@@ -1175,7 +1184,9 @@ function updateProgress(p, status) {
 function applyProgress(d) {
   const status = d.status || state.displayedStatus;
   const wasRunning = state.displayedStatus === 'queued' || state.displayedStatus === 'running';
+  const prevPhase = state.displayedPhase;
   state.displayedStatus = status;
+  state.displayedPhase = d.phase;
   noteQueuePosition(status, d.queue_position);
   updateHeaderChip(status);
 
@@ -1185,10 +1196,20 @@ function applyProgress(d) {
 
   el.resultSection.hidden = true;
   el.errorSection.hidden = true;
-  el.liveDetails.hidden = false;
-  if (!wasRunning) el.liveDetails.open = true; // open on transition only (respect manual collapse)
   setStopButton(status);
   updateProgress(d, status);
+
+  // 모델 로딩 대기 단계에서는 아직 페이지가 없으니 라이브 3-패널을 열지 않는다 —
+  // 없는 페이지 이미지를 요청해 404가 쏟아지는 것을 막는다(라이브 내용이 이미
+  // 쌓여 있으면 유지). 실제 render/ocr로 진입하면 아래 경로로 넘어간다.
+  if (d.phase === 'loading') {
+    el.liveDetails.hidden = !hasLiveContent();
+    return;
+  }
+
+  el.liveDetails.hidden = false;
+  // 로딩/미표시에서 실제 처리 단계로 처음 진입할 때 라이브 뷰를 연다 (수동 접힘 존중)
+  if (!wasRunning || prevPhase === 'loading') el.liveDetails.open = true;
 
   // Drain buffered markers/boxes FIRST so content preceding this announcement
   // stays attributed to its own page, then apply the announcement.
@@ -1638,6 +1659,7 @@ async function requestCancel() {
     teardownConnections();
     state.currentJobId = null;
     state.displayedStatus = null;
+    state.displayedPhase = null;
     showEmptyState();
     syncJobHash(null); // 404로 사라진 잡 — 해시 정리
     showToast('해당 작업을 찾을 수 없습니다.', 'warn');
