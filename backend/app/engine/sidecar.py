@@ -20,9 +20,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..sidecar.client import SidecarClient, SidecarError
+from ..sidecar.client import (
+    SidecarClient,
+    SidecarError,
+    SidecarUnavailableError,
+)
 from ..sidecar.materializer import ChunkMaterializer
-from ..sidecar.protocol import PageResult, sanitize_page
+from ..sidecar.protocol import FIGURE_PLACEHOLDER_RE, PageResult, sanitize_page
 from .base import EngineCapabilities, EngineError, JobCanceled, OCREngine, StreamSink
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -33,6 +37,13 @@ if TYPE_CHECKING:  # pragma: no cover
 # connect timeout만큼 묶이고, 잡 실행 중에는 페이지마다 같은 대기가 반복된다.
 _HEALTH_CACHE_TTL_S = 5.0
 _MAX_JOB_WARNINGS = 40
+_MODEL_WAIT_POLL_S = 3.0   # wait_until_ready 폴링 간격
+
+
+class SidecarNotReadyError(EngineError):
+    """sidecar는 응답하지만 모델이 아직 로드 중 — 일시적(대기하면 준비됨)."""
+
+    transient = True
 
 
 class _AnyCancel:
@@ -43,6 +54,35 @@ class _AnyCancel:
 
     def is_set(self) -> bool:
         return any(s.is_set() for s in self._signals)
+
+
+def _live_stream_text(page: PageResult) -> str:
+    """라이브 뷰용 스트림 표현 — 텍스트(markdown) + figure 그라운딩 토큰.
+
+    페이지 markdown의 `[[FIGURE:n]]` placeholder를 해당 image 블록의 bbox로
+    `<|det|>image [x1, y1, x2, y2]<|/det|>` 그라운딩 토큰으로 치환한다. 프론트의
+    라이브 파서가 이 토큰으로 원본 이미지 위에 박스를 그리고(왼쪽 패널),
+    structurePreview가 나머지 markdown을 렌더한다(RAW·미리보기 패널). 이 표현은
+    라이브 뷰 전용이며 저장/병합되는 결과 markdown에는 영향을 주지 않는다.
+
+    figure_only 엔진(Ovis)은 텍스트 bbox가 없으므로 텍스트는 markdown 그대로
+    흐르고 figure만 박스가 되며, full-layout 엔진(Paddle)도 동일하게 동작한다.
+    """
+    boxes: dict[int, tuple[int, int, int, int]] = {
+        b.figure_index: b.bbox
+        for b in page.blocks
+        if b.type == "image" and b.figure_index is not None and b.bbox is not None
+    }
+
+    def _repl(m) -> str:
+        idx = int(m.group(1))
+        bbox = boxes.get(idx)
+        if bbox is None:
+            return ""  # crop이 폐기된 figure — 박스 없이 제거
+        x1, y1, x2, y2 = bbox
+        return f"<|det|>image [{x1}, {y1}, {x2}, {y2}]<|/det|>"
+
+    return FIGURE_PLACEHOLDER_RE.sub(_repl, page.markdown)
 
 
 @dataclass(frozen=True)
@@ -97,7 +137,8 @@ class SidecarEngine(OCREngine):
         return h is not None and h.model_loaded
 
     def _probe_health(self):
-        """health 프로브 (성공·실패 모두 TTL 캐시). 반환: (health|None, error|None)."""
+        """health 프로브 (성공·실패 모두 TTL 캐시) — /api/health 폴링용.
+        반환: (health|None, error|None). 준비 대기 루프는 _check_ready(직접·유형 구분)를 쓴다."""
         now = time.monotonic()
         with self._health_lock:
             if now - self._last_probe_ts < _HEALTH_CACHE_TTL_S and (
@@ -119,27 +160,81 @@ class SidecarEngine(OCREngine):
             self.device = health.device or self.device
         return health, error
 
-    def load(self) -> None:
-        """provider health 확인 — 모델 로드는 sidecar가 자체 수행한다.
+    def _commit_health(self, h) -> None:
+        """정상 health 응답을 캐시에 반영 (loaded/gpu_name/device/dtype 갱신)."""
+        with self._health_lock:
+            self._last_health = h
+            self._last_health_error = None
+            self._last_probe_ts = time.monotonic()
+        self.dtype_name = h.dtype or self.dtype_name
+        self.device = h.device or self.device
 
-        provider가 죽었거나 아직 로딩 중이면 명확한 EngineError를 던진다
-        (무한 대기/재시도 없음 — 잡 단위 실패로 표면화되고 다음 잡에서 재확인).
-        실패 결과도 캐시되므로 provider가 죽은 동안 페이지마다 연결을 재시도하며
-        타임아웃을 반복하지 않는다 (TTL 후 자동 재확인).
+    def _check_ready(self, force: bool = False) -> None:
+        """준비 상태를 확인하고 미준비 시 **유형별** 예외를 던진다.
+
+        전송 계층 예외를 문자열로 평탄화하지 않고 직접 받아 구분한다:
+        - 연결 실패(SidecarUnavailableError)·모델 미로드: 일시적(transient) — 대기하면 풀림
+        - **프로토콜/엔진 불일치(SidecarProtocolError)**: 영구 오설정(URL 오배선·버전 불일치)
+          — 대기해도 안 풀리므로 하드 실패(EngineError)로 즉시 전파해야 한다.
+        - sidecar 자체 로드 실패(status=error, CUDA 가드 트립 등): 하드 실패
+        준비됐으면 조용히 반환(loaded=True).
         """
+        if self.loaded and not force:
+            return
+        try:
+            h = self._client.health()
+        except SidecarUnavailableError as e:
+            # 기동 직후엔 컨테이너가 아직 안 떴을 수 있어 일시적으로 취급
+            raise SidecarNotReadyError(f"sidecar에 아직 연결할 수 없습니다: {e}") from e
+        except SidecarError as e:
+            # 프로토콜/엔진 불일치 등 — 대기 무의미, 하드 실패
+            raise EngineError(f"sidecar 통신 오류(대기해도 해소되지 않음): {e}") from e
+        self._commit_health(h)
+        if h.status != "ok":
+            # sidecar가 자기 로드 실패를 보고 — 대기해도 안 풀린다 (하드 실패)
+            detail = h.load_error or f"sidecar 상태 이상({h.status})"
+            raise EngineError(f"sidecar 모델 로드 실패: {detail}")
+        if not h.model_loaded:
+            raise SidecarNotReadyError(
+                "sidecar가 아직 모델을 로드하지 못했습니다 — 최초 기동은 모델 다운로드·"
+                "컴파일로 수 분 걸릴 수 있습니다 (진행: docker compose logs -f)"
+            )
+
+    def load(self) -> None:
+        """준비 상태 1회 확인 (대기 없음). 미준비면 유형별 예외.
+
+        멱등: 이미 loaded면 즉시 반환. 프리로드(main)와 워커가 호출한다 — 워커는
+        실제로는 wait_until_ready로 대기하고, load()는 단발 확인/프리로드용이다.
+        """
+        self._check_ready()
+
+    def wait_until_ready(self, cancel, on_wait=None) -> None:
+        """모델이 준비될 때까지 취소 가능하게 폴링 대기 (상한 sidecar_model_wait_s).
+
+        최초 기동의 다운로드·컴파일 창에 업로드해도 잡을 실패시키지 않고 기다린다.
+        하드 실패(sidecar 자체 로드 실패)는 대기하지 않고 즉시 전파, 취소 시 JobCanceled."""
         if self.loaded:
             return
-        health, error = self._probe_health()
-        if error is not None:
-            raise EngineError(error)
-        if health.status != "ok":
-            raise EngineError(f"sidecar 상태 이상: {health.status}")
-        if not health.model_loaded:
-            raise EngineError(
-                "sidecar가 아직 모델을 로드하지 못했습니다 — 최초 기동은 모델 다운로드로 "
-                "수 분 걸릴 수 있습니다. 잠시 후 다시 시도하세요 "
-                "(진행: docker compose logs -f)"
-            )
+        deadline = time.monotonic() + self._settings.sidecar_model_wait_s
+        last = ""
+        while True:
+            if cancel.is_set():
+                raise JobCanceled()
+            try:
+                self._check_ready(force=True)
+                return  # 준비됨
+            except SidecarNotReadyError as e:
+                last = str(e)
+            # EngineError(하드 실패)는 여기서 잡지 않고 그대로 전파 — 대기 무의미
+            if time.monotonic() >= deadline:
+                raise EngineError(
+                    f"sidecar 모델이 제한시간({int(self._settings.sidecar_model_wait_s)}초) 내에 "
+                    f"준비되지 않았습니다 ({last}). OCR_SIDECAR_MODEL_WAIT_S로 늘리거나 "
+                    "docker compose logs로 sidecar 상태를 확인하세요."
+                )
+            if on_wait is not None:
+                on_wait("모델 로딩 대기 중… (최초 기동은 다운로드·컴파일로 수 분 소요)")
+            cancel.wait(_MODEL_WAIT_POLL_S)  # 취소 가능한 슬립
 
     def capabilities(self) -> EngineCapabilities:
         h = self._last_health
@@ -243,12 +338,25 @@ class SidecarEngine(OCREngine):
 
         for local_page, page in pages:
             # 취소 이후 도착한 결과는 병합하지 않는다 (여기 도달 전에 JobCanceled 전파)
-            md = mat.add_page(page, image_paths[local_page], local_page)
+            # 라이브 뷰용 스트림은 **그라운딩 토큰 표현**으로 발행한다(처리된 md와 별개):
+            # figure는 <|det|>image [bbox]<|/det|>로 내보내 왼쪽 원본+레이아웃 패널의
+            # 실시간 박스 오버레이가 그려지게 하고, 텍스트는 마크다운 그대로 흘려
+            # RAW/미리보기 패널이 채워지게 한다 (Unlimited의 라이브 경험과 동일).
+            live = _live_stream_text(page)
             if single:
-                sink.on_text(md)
+                sink.on_text(live)
             else:
                 sink.on_text("<PAGE>\n")
-                sink.on_text(md + "\n")
+                sink.on_text(live + "\n")
+            # 이 페이지 토큰을 즉시 flush한다 — 동시성>1의 다중 페이지 청크에서 다음
+            # 페이지의 <PAGE>가 유발하는 progress(current_page+1)보다 **먼저** 와이어에
+            # 실리게 해, 라이브 박스가 다음 페이지로 오귀속되는 것을 막는다.
+            # (StreamSink는 flush를 요구하지 않으므로 있는 경우에만 호출)
+            flush = getattr(sink, "flush", None)
+            if callable(flush):
+                flush()
+            # 반환/병합용은 처리된 마크다운(![](images/…))을 그대로 유지한다
+            md = mat.add_page(page, image_paths[local_page], local_page)
             parts.append(md)
         for w in mat.warnings:
             self._note(w)

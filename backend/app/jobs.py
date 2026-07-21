@@ -333,6 +333,7 @@ class Worker(threading.Thread):
         self._queue.put(None)
 
     def run(self) -> None:
+        from .engine.base import JobCanceled
         from .pipeline.runner import execute_job
 
         while True:
@@ -341,6 +342,10 @@ class Worker(threading.Thread):
                 return
             job = self.store.get(job_id)
             if job is None:
+                # queued 상태에서 삭제돼 dequeue 시 이미 사라진 잡 — cancel_events도
+                # 정리한다(다른 종료 경로는 모두 pop하는데 이 경로만 누락돼 Event가
+                # 영구 축적되던 누수 수정).
+                self.cancel_events.pop(job_id, None)
                 continue
             cancel = self.cancel_events.setdefault(job_id, threading.Event())
             if job.delete_requested or cancel.is_set():
@@ -353,10 +358,27 @@ class Worker(threading.Thread):
                 continue
             try:
                 if not self.engine.loaded:
-                    self.broker.publish(job_id, "progress", {"phase": "render", "status": "queued",
-                                                             "current_page": 0, "total_pages": 0,
-                                                             "chunk": 0, "total_chunks": 0})
-                    self.engine.load()
+                    def _on_wait(note: str, _jid: str = job_id) -> None:
+                        # 모델 로딩 대기를 진행 상태로 알린다 — 프론트가 "모델 로딩
+                        # 대기 중…"을 표시하고, 잡이 조용히 멈춘 것처럼 보이지 않게 한다.
+                        self.broker.publish(_jid, "progress", {
+                            "phase": "loading", "status": "queued", "note": note,
+                            "current_page": 0, "total_pages": 0, "chunk": 0, "total_chunks": 0,
+                        })
+
+                    _on_wait("모델 로딩 대기 중…")
+                    self.engine.wait_until_ready(cancel, on_wait=_on_wait)
+            except JobCanceled:
+                # 대기 중 사용자가 취소 — 오류가 아니라 취소로 마감
+                job.status = "canceled"
+                job.error = "사용자에 의해 취소되었습니다"
+                self.store.save(job)
+                if job.delete_requested:
+                    self.store.delete_dir(job)
+                else:
+                    self.broker.publish(job_id, "error", {"message": job.error, "canceled": True})
+                self.cancel_events.pop(job_id, None)
+                continue
             except Exception as e:  # noqa: BLE001 — 로드 실패를 잡 오류로 변환
                 logger.exception("엔진 로드 실패")
                 job.status = "error"

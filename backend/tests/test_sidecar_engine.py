@@ -89,8 +89,111 @@ def test_load_fails_clearly_when_sidecar_down(tmp_path):
 def test_load_fails_clearly_while_model_loading(tmp_path, stub):
     stub.health_response = _health_body(model_loaded=False)
     eng = build_engine(_settings(tmp_path, stub))
-    with pytest.raises(EngineError, match="아직 모델을 로드하지"):
+    from app.engine.sidecar import SidecarNotReadyError
+
+    with pytest.raises(SidecarNotReadyError, match="아직 모델을 로드하지") as ei:
         eng.load()
+    # 미준비는 일시적(transient) — 프리로드가 하드 실패로 로깅하지 않는다
+    assert ei.value.transient is True
+
+
+def test_wait_until_ready_waits_then_succeeds(tmp_path, stub, monkeypatch):
+    """모델 로딩 창에 제출된 잡은 실패하지 않고 준비될 때까지 기다린다."""
+    import threading
+
+    stub.health_response = _health_body(model_loaded=False)
+    eng = build_engine(_settings(tmp_path, stub))
+    notes = []
+    cancel = threading.Event()
+
+    def _delayed_ready():
+        import time as _t
+        _t.sleep(0.3)
+        stub.health_response = _health_body(model_loaded=True)  # 준비 완료로 전환
+
+    t = threading.Thread(target=_delayed_ready)
+    t.start()
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.05)  # 테스트 속도
+    try:
+        eng.wait_until_ready(cancel, on_wait=lambda note: notes.append(note))
+    finally:
+        t.join()
+    assert eng.loaded
+    assert any("모델 로딩 대기" in n for n in notes)
+
+
+def test_wait_until_ready_cancellable(tmp_path, stub, monkeypatch):
+    """대기 중 취소하면 JobCanceled — 무한 대기하지 않는다."""
+    import threading
+
+    from app.engine.base import JobCanceled
+
+    stub.health_response = _health_body(model_loaded=False)
+    eng = build_engine(_settings(tmp_path, stub))
+    cancel = threading.Event()
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.05)
+    threading.Timer(0.2, cancel.set).start()
+    with pytest.raises(JobCanceled):
+        eng.wait_until_ready(cancel, on_wait=None)
+
+
+def test_wait_until_ready_hard_failure_not_awaited(tmp_path, stub):
+    """sidecar 자체 로드 실패(status=error, CUDA 가드 등)는 대기하지 않고 즉시 오류."""
+    import threading
+
+    stub.health_response = _health_body(status="error", model_loaded=False,
+                                        load_error="CUDA를 사용할 수 없습니다")
+    eng = build_engine(_settings(tmp_path, stub))
+    with pytest.raises(EngineError, match="CUDA를 사용할 수 없습니다"):
+        eng.wait_until_ready(threading.Event(), on_wait=None)
+
+
+def test_wait_until_ready_engine_mismatch_hard_fails_no_wait(tmp_path, stub, monkeypatch):
+    """OCR_SIDECAR_URL이 다른 엔진 컨테이너를 가리키면(프로토콜/엔진 불일치) 대기하지
+    않고 즉시 하드 실패해야 한다 — transient로 오분류돼 15분 대기하던 회귀 방지."""
+    import threading
+
+    # 다른 엔진 이름을 반환 → client._check_identity가 SidecarProtocolError를 던진다
+    stub.health_response = _health_body(engine="paddleocr_vl", model_loaded=True)
+    eng = build_engine(_settings(tmp_path, stub))  # engine_name="ovisocr2"
+    monkeypatch.setattr("app.engine.sidecar._MODEL_WAIT_POLL_S", 0.05)
+    import time as _t
+    t0 = _t.monotonic()
+    with pytest.raises(EngineError, match="통신 오류"):
+        eng.wait_until_ready(threading.Event(), on_wait=None)
+    assert _t.monotonic() - t0 < 2.0, "불일치는 즉시 실패해야 한다 (대기 금지)"
+
+
+def test_live_stream_emits_grounding_for_figures(tmp_path, stub):
+    """라이브 스트림은 figure를 <|det|>image 그라운딩으로, 텍스트는 markdown으로 발행."""
+    import threading
+
+    body = _parse_body()
+    body["page"]["markdown"] = "# 제목\n\n본문 문단\n\n[[FIGURE:0]]\n\n<table>셀</table>"
+    body["page"]["blocks"] = [{"type": "image", "bbox": [100, 200, 800, 700],
+                               "content": "", "order": 0, "figure_index": 0}]
+    stub.parse_behavior = lambda: (200, json.dumps(body).encode())
+
+    eng = build_engine(_settings(tmp_path, stub))
+    eng.load()
+    from PIL import Image
+
+    page_png = tmp_path / "p.png"
+    Image.new("RGB", (400, 560), "white").save(page_png)
+    texts = []
+
+    class Sink:
+        def on_text(self, t):
+            texts.append(t)
+
+    eng.run_multi([page_png], tmp_path / "c", Sink(), threading.Event())
+    stream = "".join(texts)
+    # 라이브 뷰 박스용 그라운딩 토큰
+    assert "<|det|>image [100, 200, 800, 700]<|/det|>" in stream
+    # 텍스트/표는 markdown 그대로 (미리보기용)
+    assert "# 제목" in stream and "<table>셀</table>" in stream
+    # placeholder는 스트림에 노출 안 됨
+    assert "[[FIGURE" not in stream
 
 
 def test_provider_health_surface(tmp_path, stub):
@@ -336,16 +439,20 @@ def test_provider_health_caches_failures(tmp_path, stub, monkeypatch):
         raise SidecarUnavailableError("연결할 수 없습니다")
 
     monkeypatch.setattr(eng._client, "health", _boom)
+    # provider_health(/api/health 폴링)는 TTL 캐시 — 죽은 sidecar를 매번 때리지 않는다
     first = eng.provider_health()
     second = eng.provider_health()
     assert first["status"] == "unreachable"
     assert second == first
-    assert calls["n"] == 1, "TTL 내 두 번째 호출은 캐시를 쓴다"
+    assert calls["n"] == 1, "TTL 내 두 번째 provider_health는 캐시를 쓴다"
     assert not eng.loaded
-    # load()도 캐시된 실패로 즉시 실패 (페이지마다 타임아웃을 반복하지 않는다)
-    with pytest.raises(EngineError, match="연결할 수 없습니다"):
+    # load()는 유형 구분을 위해 신선 프로브를 한다(잡당 1회만 호출 — 페이지별 아님).
+    # 연결 실패는 일시적(SidecarNotReadyError)으로 분류돼 대기 가능하다.
+    from app.engine.sidecar import SidecarNotReadyError
+
+    with pytest.raises(SidecarNotReadyError, match="연결할 수 없습니다") as ei:
         eng.load()
-    assert calls["n"] == 1
+    assert ei.value.transient is True
 
 
 def test_sanitize_warnings_reach_job(sidecar_client_app, stub):

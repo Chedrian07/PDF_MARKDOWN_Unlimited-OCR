@@ -283,6 +283,56 @@ def test_markdown_html_rewrite_and_escape():
     assert "&lt;script&gt;" in html
 
 
+def test_html_table_with_attributes_restored():
+    """OvisOCR2가 <table border="1">처럼 속성을 붙여도 표가 렌더돼야 한다.
+    여는 태그가 통째로 이스케이프돼 표가 깨지던 회귀(2026-07-21) 방지."""
+    md = '<table border="1"><tr><td>Mode</td><td>size</td></tr><tr><td>gundam</td><td>1024</td></tr></table>'
+    html = render_markdown_html(md, "/b")
+    assert "<table>" in html           # 여는 태그 복원 (속성은 제거)
+    assert "&lt;table" not in html      # 이스케이프된 여는 태그가 남지 않음
+    assert "<td>Mode</td>" in html
+    assert "border" not in html         # 임의 속성은 버려짐
+
+
+def test_html_table_colspan_preserved_attrs_dropped():
+    md = '<table><tr><td colspan="2" class="x">merged</td></tr></table>'
+    html = render_markdown_html(md, "/b")
+    assert '<td colspan="2">merged</td>' in html  # colspan 유지
+    assert "class" not in html                     # 그 외 속성 제거
+
+
+def test_html_table_attribute_xss_stripped():
+    md = '<table onclick="alert(1)"><tr onmouseover="x"><td style="a">safe</td></tr></table>'
+    html = render_markdown_html(md, "/b")
+    assert "<table>" in html
+    assert "onclick" not in html and "onmouseover" not in html and "alert" not in html
+    assert "<td>safe</td>" in html
+
+
+def test_tag_name_prefix_not_collapsed_to_table_tag():
+    """`<threshold>`/`<trace>` 등 접두가 th/tr인 본문 플레이스홀더가 표 태그로 붕괴돼
+    가운데 텍스트가 삭제되던 회귀(2026-07-21) 방지 — 태그명 뒤 경계 강제."""
+    import re
+
+    for raw, kept in [
+        ("<threshold> 값을 넘으면", "threshold"),
+        ("<trace> 로깅", "trace"),
+        ("<tableau> 대시보드", "tableau"),
+        ("<td-custom>x", "td-custom"),
+        ("<theme>y", "theme"),
+    ]:
+        html = render_markdown_html(raw, "/b")
+        body = re.sub(r"<[^>]*>", "", html)
+        assert kept in body, f"{raw!r}: '{kept}' 텍스트가 삭제됨 → {body!r}"
+
+
+def test_data_colspan_not_promoted():
+    """data-colspan/x-rowspan 같은 접미 속성이 진짜 colspan으로 오승격되지 않는다."""
+    html = render_markdown_html('<table><tr><td data-colspan="9">x</td></tr></table>', "/b")
+    assert "<table>" in html
+    assert "colspan" not in html  # data-colspan은 유지도 승격도 안 됨(속성 제거)
+
+
 def test_math_inline_normalized():
     md = "질량은 \\( E = mc^{2} \\) 이고 인용은 \\( [10, 30, 33] \\) 형태다."
     html = render_markdown_html(md, "/b")

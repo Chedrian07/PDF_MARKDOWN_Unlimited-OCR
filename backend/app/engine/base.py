@@ -15,11 +15,19 @@ import abc
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable
 
 
 class EngineError(RuntimeError):
-    """엔진 실행 실패 (사용자에게 노출 가능한 메시지)."""
+    """엔진 실행 실패 (사용자에게 노출 가능한 메시지).
+
+    transient=True이면 "일시적"(재시도/대기하면 해소될 수 있음) 조건이다 — 프리로드가
+    이를 하드 실패로 로깅하지 않고, 워커의 준비 대기가 계속 기다린다."""
+
+    transient: bool = False
 
 
 class RepetitiveOutputError(EngineError):
@@ -93,6 +101,19 @@ class OCREngine(abc.ABC):
 
         프리로드 스레드(main)와 워커 스레드(jobs)가 동시에 호출할 수 있다.
         """
+
+    def wait_until_ready(
+        self,
+        cancel: "threading.Event",
+        on_wait: "Callable[[str], None] | None" = None,
+    ) -> None:
+        """잡 처리 가능 상태가 될 때까지 블로킹 확보 (워커가 잡 시작 전에 호출).
+
+        기본 구현은 load() 1회 — in-process 엔진은 load()가 모델 적재까지 블로킹하므로
+        반환 시점에 곧 사용 가능하다. sidecar 엔진은 이를 오버라이드해 모델이 준비될
+        때까지 취소 가능하게 폴링 대기한다(최초 기동의 다운로드·컴파일을 잡 실패로
+        만들지 않기 위해). on_wait(note)는 대기 중 진행 문구를 전달하는 콜백."""
+        self.load()
 
     @abc.abstractmethod
     def run_multi(

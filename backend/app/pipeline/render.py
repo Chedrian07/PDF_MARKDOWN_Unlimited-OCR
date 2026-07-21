@@ -35,17 +35,31 @@ _md.use(dollarmath_plugin, allow_space=True, double_inline=False)
 _md.add_render_rule("math_inline", _render_math_inline)
 _md.add_render_rule("math_block", _render_math_block)
 
+# 표 구조 태그만 복원한다. 여는 태그의 **임의 속성**(border/style/class/onclick 등)은
+# 전부 버리고 colspan/rowspan(숫자)만 유지한다 — OvisOCR2처럼 모델이 `<table border="1">`
+# 로 속성을 붙여도 여는 태그가 통째로 이스케이프돼 표가 깨지던 것을 고친다.
+# 태그명 **직후에 경계**(공백/`/`/`&gt;`)를 룩어헤드로 강제한다 — 이게 없으면 `<threshold>`·
+# `<trace>` 같은 본문/코드 플레이스홀더의 접두 `th`/`tr`가 표 태그로 오인돼 가운데 텍스트가
+# 소리없이 삭제된다. 속성은 태그 경계(&gt;/&lt;)를 넘지 않는 tempered-dot으로 300자까지
+# 소거 대상으로 잡는다(백트래킹·폭탄 방어). 원본 속성이 그대로 통과하지 않으므로 XSS-safe.
 _TABLE_TAG = re.compile(
-    r"&lt;(/?)(table|thead|tbody|tr|th|td)"
-    r"((?:\s+(?:colspan|rowspan)=&quot;\d{1,3}&quot;)*)\s*&gt;"
+    r"&lt;(/?)(table|thead|tbody|tr|th|td)(?=[\s/]|&gt;)"
+    r"((?:(?!&gt;|&lt;).){0,300}?)"
+    r"\s*/?&gt;"
 )
+# 진짜 속성은 앞에 공백이 있다 — data-colspan/x-rowspan 같은 접미 속성을 오승격하지 않게
+# 선행 공백을 요구한다(구분자 뒤 워드경계만으로는 `-colspan`도 매칭됐다).
+_SAFE_TABLE_ATTR = re.compile(r"(?<=\s)(colspan|rowspan)=&quot;(\d{1,3})&quot;")
 
 
 def _restore_table_tags(html: str) -> str:
     def _repl(m: re.Match) -> str:
         slash, tag, attrs = m.groups()
-        attrs = attrs.replace("&quot;", '"') if attrs else ""
-        return f"<{slash}{tag}{attrs}>"
+        safe = ""
+        if not slash and attrs:  # 닫는 태그엔 속성이 없다
+            for name, val in _SAFE_TABLE_ATTR.findall(attrs):
+                safe += f' {name}="{val}"'
+        return f"<{slash}{tag}{safe}>"
 
     return _TABLE_TAG.sub(_repl, html)
 

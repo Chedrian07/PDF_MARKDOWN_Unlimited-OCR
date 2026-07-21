@@ -41,6 +41,7 @@ import {
   providerIssue,
   jobModelChip,
   docLayoutNoteFor,
+  progressPhaseText,
 } from '../app.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
@@ -778,6 +779,22 @@ test('docLayoutNoteFor: figure_only 엔진 잡에만 안내, 엔진 불일치·f
   assert.equal(docLayoutNoteFor('figure_only', 'unlimited', 'ovisocr2'), null, '다른 엔진의 잡 → 무표시');
   assert.equal(docLayoutNoteFor('full', 'paddleocr_vl', 'paddleocr_vl'), null, 'full layout은 안내 불필요');
   assert.equal(docLayoutNoteFor(undefined, undefined, undefined), null, 'legacy health');
+});
+
+test('progressPhaseText: note(모델 로딩) 최우선, 없으면 queued/phase 규칙', () => {
+  // note는 status·phase보다 우선 (모델 로딩 대기 중)
+  assert.equal(progressPhaseText({ note: '모델 로딩 대기 중…', phase: 'loading' }, 'queued', '대기중'),
+    '모델 로딩 대기 중…');
+  // queued인데 note 없으면 대기열 문구
+  assert.equal(progressPhaseText({ phase: 'render' }, 'queued', '대기중 · 2번째'), '대기중 · 2번째');
+  // 진행 중이면 phase 라벨
+  assert.equal(progressPhaseText({ phase: 'ocr' }, 'running', '대기중'), 'OCR');
+  assert.equal(progressPhaseText({ phase: 'loading' }, 'running', '대기중'), '모델 로딩 대기');
+  assert.equal(progressPhaseText({ phase: 'merge' }, 'running'), '병합');
+  // 미지 phase는 '처리 중'
+  assert.equal(progressPhaseText({ phase: 'weird' }, 'running'), '처리 중');
+  // 빈 note는 무시
+  assert.equal(progressPhaseText({ note: '', phase: 'ocr' }, 'running', 'x'), 'OCR');
 });
 
 test('docLayoutNoteFor: 구버전 잡(엔진 메타 없음)에는 안내하지 않는다', () => {

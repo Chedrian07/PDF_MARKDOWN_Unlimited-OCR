@@ -39,7 +39,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             engine.load()
         except Exception as e:  # noqa: BLE001 — 헬스에 노출하고 잡 제출 시 재시도
-            logger.exception("모델 프리로드 실패")
+            # 일시적 조건(sidecar가 아직 준비 중)은 정상적인 기동 과정이다 —
+            # 무서운 traceback 대신 info로 남기고, 잡 제출 시 워커가 대기한다.
+            if getattr(e, "transient", False):
+                logger.info("모델 프리로드 대기: %s", str(e)[:200])
+            else:
+                logger.exception("모델 프리로드 실패")
             load_state["error"] = str(e)[:500]
 
     async def _gc_loop(app_: FastAPI) -> None:

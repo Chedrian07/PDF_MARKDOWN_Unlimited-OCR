@@ -98,6 +98,10 @@ class Settings:
     sidecar_max_response_mb: int = 20   # /v1/parse 응답 크기 상한 (response bomb 방어)
     sidecar_retries: int = 1            # 연결 수립 실패 시 재시도 횟수 (읽기 중 실패는 runner 재시도 몫)
     remote_page_concurrency: int = 1    # sidecar 페이지 동시 요청 수(=sidecar 엔진의 청크 크기)
+    # 잡이 sidecar 모델 준비를 기다리는 상한(초). 최초 기동은 모델 다운로드 + vLLM
+    # 그래프 컴파일로 수 분 걸릴 수 있어 넉넉히 잡는다 — 이 시간 안에 업로드하면
+    # 잡이 실패하지 않고 대기했다가 처리된다(취소 가능).
+    sidecar_model_wait_s: float = 900.0
     # Host 헤더 화이트리스트 (DNS rebinding 방어) — 포트는 비교 시 무시됨 (localhost:8000 → localhost)
     allowed_hosts: list[str] = field(default_factory=lambda: _split_hosts(_DEFAULT_ALLOWED_HOSTS))
 
@@ -137,6 +141,7 @@ class Settings:
             sidecar_max_response_mb=max(1, _env_int("OCR_SIDECAR_MAX_RESPONSE_MB", 20)),
             sidecar_retries=max(0, _env_int("OCR_SIDECAR_RETRIES", 1)),
             remote_page_concurrency=max(1, _env_int("OCR_REMOTE_PAGE_CONCURRENCY", 1)),
+            sidecar_model_wait_s=_env_float("OCR_SIDECAR_MODEL_WAIT_S", 900.0),
         )
 
     @property

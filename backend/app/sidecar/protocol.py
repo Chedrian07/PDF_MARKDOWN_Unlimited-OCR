@@ -181,6 +181,7 @@ class SidecarHealth(BaseModel):
     gpu_total_mb: int | None = None
     gpu_free_mb: int | None = None
     model_loaded: bool = False
+    load_error: str | None = None   # sidecar 자체 로드 실패 사유 (CUDA 가드 트립 등) — 대기 무의미
 
 
 def _clamp_bbox(

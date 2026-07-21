@@ -303,7 +303,15 @@ export function syncedStreamPageNo(streamPageNo, g) {
 
 /* ============================ UI constants ============================ */
 
-const PHASE_LABELS = { render: '렌더링', ocr: 'OCR', merge: '병합' };
+const PHASE_LABELS = { loading: '모델 로딩 대기', render: '렌더링', ocr: 'OCR', merge: '병합' };
+
+// 진행 페이로드 → 진행바 좌측 문구 (순수 — frontend/tests/에서 검증).
+// note(모델 로딩 대기 등)가 있으면 최우선, 없으면 queued는 대기열 문구, 그 외 phase 라벨.
+export function progressPhaseText(p, status, queuePosLabel) {
+  if (p && typeof p.note === 'string' && p.note) return p.note;
+  if (status === 'queued') return queuePosLabel || '대기중';
+  return (p && PHASE_LABELS[p.phase]) || '처리 중';
+}
 const STATUS_LABELS = {
   queued: '대기중',
   running: '변환중',
@@ -363,6 +371,7 @@ const state = {
   healthEngine: undefined,        // 현재 활성 엔진 이름 ('unlimited'|'ovisocr2'|…)
   streamGranularity: undefined,   // 'token' | 'page'
   layoutCapability: undefined,    // 'full' | 'figure_only' | 'none'
+  modelLoaded: true,              // 모델 로드 여부 — false면 업로드 영역에 로딩 안내
   currentJobEngine: undefined,    // 열린 잡의 engine 메타 (구 잡은 undefined)
   // raw stream pane
   streamPending: '',
@@ -436,6 +445,7 @@ const EL_IDS = {
   fileSize: 'file-size',
   fileClear: 'file-clear',
   uploadError: 'upload-error',
+  uploadModelNotice: 'upload-model-notice',
   uploadBtn: 'upload-btn',
   uploadProgress: 'upload-progress',
   uploadProgressFill: 'upload-progress-fill',
@@ -693,7 +703,10 @@ function renderHealth(d) {
   // 구버전 서버 응답(필드 부재)은 undefined 유지 — 두 소비처 모두 fail-open.
   state.maxUploadMb = typeof d.max_upload_mb === 'number' ? d.max_upload_mb : undefined;
   state.translateAvailable = typeof d.translate_available === 'boolean' ? d.translate_available : undefined;
+  // 모델 로드 여부 — 업로드 영역의 "로딩 중" 안내 표시에 사용 (필드 부재는 로드된 것으로 간주)
+  state.modelLoaded = d.model_loaded === false ? false : true;
   applyTranslateAvailability(); // 잡 뷰가 열려 있는 동안의 health 갱신도 버튼에 반영
+  applyModelLoadingNotice();    // 모델 로딩 중이면 업로드 영역에 안내
 
   // 엔진 capability (신규 계약 — 필드 부재는 undefined = 기존 UI 그대로)
   const hc = healthCapabilities(d);
@@ -776,6 +789,12 @@ function renderHealthError() {
 function applyStreamModeChip() {
   if (!el.streamModeChip) return;
   el.streamModeChip.hidden = state.streamGranularity !== 'page';
+}
+
+// 모델 로딩 중이면 업로드 영역에 안내 배너 — 업로드가 "실패"가 아니라 "대기"임을 알린다.
+function applyModelLoadingNotice() {
+  if (!el.uploadModelNotice) return;
+  el.uploadModelNotice.hidden = state.modelLoaded !== false;
 }
 
 // layout capability가 figure_only인 엔진의 잡에는 레이아웃 탭에 한계 안내를 붙인다.
@@ -1125,18 +1144,20 @@ function hasLiveContent() {
 // filters to phase==="ocr".
 function updateProgress(p, status) {
   const queued = status === 'queued';
+  // 모델 로딩 대기(note)는 진행 단계가 아직 미정이라 queued와 동일하게 스피너/불확정
+  const note = (p && typeof p.note === 'string' && p.note) ? p.note : '';
   const total = Number(p.total_pages) || 0;
   const cur = Number(p.current_page) || 0;
   const totalChunks = Number(p.total_chunks) || 0;
   const chunk = Number(p.chunk) || 0;
 
   // queued 문구는 헤더/목록 칩과 동일 조합('대기중 · N번째')으로 통일
-  el.progressPhase.textContent = queued
-    ? statusLabel({ status: 'queued', queue_position: state.queuePos })
-    : (PHASE_LABELS[p.phase] || '처리 중');
-  el.progressSpinner.hidden = !queued;
+  el.progressPhase.textContent = progressPhaseText(
+    p, status, statusLabel({ status: 'queued', queue_position: state.queuePos }),
+  );
+  el.progressSpinner.hidden = !queued && !note;
 
-  const determinate = !queued && total > 0;
+  const determinate = !queued && !note && total > 0;
   el.progressTrack.classList.toggle('indeterminate', !determinate);
   if (determinate) {
     const pct = Math.min(100, Math.max(0, (cur / total) * 100));

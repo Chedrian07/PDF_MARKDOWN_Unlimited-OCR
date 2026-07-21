@@ -135,6 +135,31 @@ malformed provider response). 세 가지 모두 `EngineError` 서브클래스라
   신호를 보내지만, 위와 같은 이유로 **이미 전송된 요청은 sidecar에서 완주**한다
   (다음 재시도가 그 뒤에 줄을 선다 — 동시성을 올릴 때 감안할 것).
 
+## 라이브 뷰 스트리밍 (sidecar 엔진)
+
+sidecar 엔진은 페이지 단위라 토큰 스트림이 없지만, **라이브 3-패널 뷰는 그대로
+동작한다**. 페이지가 완료되면 SidecarEngine이 그 페이지를 **그라운딩 토큰 표현**으로
+sink에 발행한다(`_live_stream_text`):
+
+- figure는 `<|det|>image [x1, y1, x2, y2]<|/det|>`로 → 왼쪽 "원본+레이아웃" 패널의
+  실시간 박스 오버레이가 그려진다 (Unlimited와 동일한 파서 재사용).
+- 텍스트·표·수식은 markdown 그대로 흘러 → RAW·미리보기 패널이 채워진다.
+
+이 스트림 표현은 **라이브 뷰 전용**이며, 저장/병합되는 결과 markdown(`![](images/…)`)과
+분리되어 있다. 텍스트가 페이지 단위로 도착하는 것은 모델 특성상 불가피하며
+(sub-page 토큰 스트림 아님), 프론트는 "페이지 단위 갱신" 칩으로 이를 명시한다.
+
+## 최초 기동 — 모델 로딩 대기
+
+sidecar의 첫 모델 로드는 다운로드 + (Ovis) vLLM 컴파일로 수 분 걸린다. 이 창에
+업로드된 잡은 **실패하지 않고 대기**한다:
+
+- 워커가 `SidecarEngine.wait_until_ready(cancel, on_wait)`로 취소 가능하게 폴링
+  (상한 `OCR_SIDECAR_MODEL_WAIT_S`=900s). 대기 중 `phase:"loading"` 진행 이벤트 발행.
+- sidecar가 준비되면 자동으로 진행. 사용자가 취소하면 즉시 중단(JobCanceled).
+- **하드 실패 구분**: sidecar가 `status:"error"`(예: CUDA 가드 트립, `load_error` 포함)를
+  보고하면 대기하지 않고 즉시 잡 오류로 표면화한다(대기해도 안 풀리므로).
+
 ## 파이프라인 연결 (backend 내부)
 
 ```

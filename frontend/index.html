@@ -74,6 +74,12 @@
 
         <div id="upload-error" class="inline-error" role="alert" hidden></div>
 
+        <!-- 모델 로딩 중 안내 — 지금 업로드해도 로딩 완료 후 자동 처리됨(JS가 표시/숨김) -->
+        <div id="upload-model-notice" class="inline-notice" role="status" hidden>
+          <span class="spinner spinner-xs" aria-hidden="true"></span>
+          <span>모델을 불러오는 중입니다. 지금 업로드하면 로딩이 끝나는 대로 자동으로 변환됩니다.</span>
+        </div>
+
         <button id="upload-btn" class="btn btn-primary btn-block" type="button" disabled>변환 시작</button>
 
         <!-- 업로드 전송 진행률 (XHR upload.onprogress; JS가 표시/숨김) -->
