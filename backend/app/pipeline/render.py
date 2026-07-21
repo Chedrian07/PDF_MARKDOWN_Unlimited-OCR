@@ -65,34 +65,67 @@ def _restore_table_tags(html: str) -> str:
 
 
 # ── 수식 델리미터 정규화 (렌더 전용) ──────────────────────────────────
-# 실측 형태(논문 14p 산출물 + frontend/tests/fixtures 캡처):
-#   인라인   `\( … \)` (한 줄, 공백 패딩 흔함 — 인용 `\( [10, 30] \)` 포함)
-#   디스플레이 `\[` 단독 줄 + 본문 + `\]` 단독 줄 (여러 줄)
-#   `$$`/코드펜스는 관측되지 않았지만 코드 구간은 방어적으로 마스킹한다.
+# 엔진별 수식 표기가 다르다 (둘 다 지원해야 한다):
+#   Unlimited-OCR: 인라인 `\( … \)`, 디스플레이 `\[ … \]`
+#   OvisOCR2·PaddleOCR-VL: 인라인 `$ … $`, 디스플레이 `$$ … $$` (표준 LaTeX)
+# `$`는 통화($5)와 수식이 모두 쓰는 모호한 문자다 — `$$`는 항상 수식으로, `$…$`는
+# 내용이 LaTeX스러울 때(\^_{} 포함)만 수식으로, 그 외 bare `$`는 통화로 이스케이프한다.
+# 결과 md(result.md)는 원본 표기를 그대로 보존하고, 변환은 렌더에서만 한다.
 _CODE_REGION = re.compile(
     r"^```.*?^```[ \t]*$|^~~~.*?^~~~[ \t]*$|`[^`\n]+`",
     re.DOTALL | re.MULTILINE,
 )
 _MATH_DISPLAY = re.compile(r"\\\[(.+?)\\\]", re.DOTALL)
 _MATH_INLINE = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
+_MATH_DOLLAR_DISPLAY = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
+_MATH_DOLLAR_INLINE = re.compile(r"\$([^$\n]+?)\$")
+_MATH_LIKE = re.compile(r"[\\^_{}]")  # LaTeX 명령/첨자
 _MASK_FMT = "\x00MDMASK{}\x00"
 
 
+def _is_inline_dollar_math(tex: str) -> bool:
+    """`$…$` 내용이 수식인가 — LaTeX스럽거나(단항 포함), 통화가 아닌 짧은 변수식.
+
+    구분: 수식 변수($T·$x·$\\tau)는 문자/기호로 시작하고, 통화($5·$10·$5 그리고·
+    $5 million)는 숫자로 시작한다. 숫자+변수($2x, LaTeX 없음)는 드물어 리터럴로 두는
+    편이 안전하다 — KaTeX 오류보다 원문 텍스트가 낫다. 긴 산문은 길이로 배제."""
+    tex = tex.strip()
+    if _MATH_LIKE.search(tex):
+        return True
+    return bool(tex) and not tex[0].isdigit() and len(tex) <= 40
+
+
 def _normalize_math_delimiters(md_text: str) -> str:
-    """`\\(..\\)`→`$..$`, `\\[..\\]`→`$$..$$` (내용 트림, 빈 수식 제거).
-    코드펜스/인라인 코드 구간은 마스킹해 건드리지 않는다."""
+    """엔진별 수식 표기(`\\(..\\)`/`\\[..\\]` 및 `$..$`/`$$..$$`)를 dollarmath 대상으로
+    정규화한다. 코드 구간은 마스킹, 통화용 bare `$`는 이스케이프해 오탐을 막는다."""
     masked: list[str] = []
 
-    def _mask(m: re.Match) -> str:
-        masked.append(m.group(0))
+    def _mask_literal(text: str) -> str:
+        masked.append(text)
         return _MASK_FMT.format(len(masked) - 1)
 
-    md_text = _CODE_REGION.sub(_mask, md_text)
+    # 1) 코드펜스/인라인 코드 보호
+    md_text = _CODE_REGION.sub(lambda m: _mask_literal(m.group(0)), md_text)
 
-    # 원문에 이미 있는 bare `$`(통화 등)는 이스케이프해 수식 오탐을 차단 —
-    # 이 함수가 만들어 넣는 $-델리미터만 dollarmath가 수식으로 해석하게 된다.
+    # 2) 모델이 `$$`/`$`로 낸 수식을 **통화 이스케이프 전에** 마스킹(Ovis/Paddle).
+    #    $$는 항상 수식, $…$는 LaTeX스러운 내용일 때만(그 외는 통화로 남겨 이스케이프).
+    def _mask_dollar_display(m: re.Match) -> str:
+        tex = m.group(1).strip()
+        return _mask_literal(f"\n\n$$\n{tex}\n$$\n\n") if tex else ""
+
+    def _mask_dollar_inline(m: re.Match) -> str:
+        tex = m.group(1).strip()
+        if not tex or not _is_inline_dollar_math(tex):
+            return m.group(0)  # 통화 등 — 마스킹하지 않고 아래에서 이스케이프되게 둔다
+        return _mask_literal(f"${tex}$")
+
+    md_text = _MATH_DOLLAR_DISPLAY.sub(_mask_dollar_display, md_text)
+    md_text = _MATH_DOLLAR_INLINE.sub(_mask_dollar_inline, md_text)
+
+    # 3) 남은 bare `$`(통화)는 이스케이프 — 이 함수가 만든 $-델리미터만 수식이 된다
     md_text = md_text.replace("$", "\\$")
 
+    # 4) Unlimited의 `\(..\)`/`\[..\]` → `$..$`/`$$..$$`
     def _display(m: re.Match) -> str:
         tex = m.group(1).strip()
         return f"\n\n$$\n{tex}\n$$\n\n" if tex else ""
@@ -104,6 +137,7 @@ def _normalize_math_delimiters(md_text: str) -> str:
     md_text = _MATH_DISPLAY.sub(_display, md_text)
     md_text = _MATH_INLINE.sub(_inline, md_text)
 
+    # 5) 마스킹 복원 (코드 + $$/$ 수식)
     for i, original in enumerate(masked):
         md_text = md_text.replace(_MASK_FMT.format(i), original)
     return md_text

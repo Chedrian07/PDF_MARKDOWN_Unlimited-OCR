@@ -283,6 +283,51 @@ def test_markdown_html_rewrite_and_escape():
     assert "&lt;script&gt;" in html
 
 
+def test_dollar_math_renders_for_sidecar_engines():
+    """OvisOCR2/PaddleOCR-VL는 수식을 $..$/$$..$$로 낸다 — 렌더러가 통화로 오인해
+    이스케이프하며 수식이 깨진 텍스트로 나오던 것(2026-07-21) 방지."""
+    import re
+
+    # 인라인 $..$ (LaTeX스러운 내용) → math-inline 스팬
+    h = render_markdown_html(r"값은 $\tau^{2}$ 이고 $\sigma = \sqrt{x}$ 이다", "/b")
+    assert h.count('class="math-inline"') == 2
+    assert "\\tau^{2}" in h and "\\sigma" in h
+    assert "$" not in re.sub(r"<[^>]+>", "", h)  # 본문에 raw $ 잔존 없음
+    # 디스플레이 $$..$$ → math-display
+    h2 = render_markdown_html(r"$$E = mc^2$$", "/b")
+    assert 'class="math-display"' in h2 and "E = mc^2" in h2
+    # 위첨자 별표 $^{*}$가 <em>으로 깨지지 않는다
+    h3 = render_markdown_html(r"각주 $^{*}$ 표시", "/b")
+    assert 'class="math-inline"' in h3 and "<em>" not in h3
+
+
+def test_dollar_single_variable_is_math():
+    """단일 변수 $T$·$x$·$z$도 수식이다(LaTeX 명령이 없어도) — 실 논문 실측."""
+    h = render_markdown_html("at most $T$ steps with seed $z$ and $x$", "/b")
+    assert h.count('class="math-inline"') == 3
+
+
+def test_dollar_currency_not_mathified():
+    """통화($5/$10, 뒤에 한글·영문 단위 포함)는 수식이 아니다 — 숫자로 시작하면 통화."""
+    for md in ["가격은 $5 그리고 $10 입니다.", "비용 $5 만원", "cost $5 million total",
+               "I have $5 and it costs $10"]:
+        h = render_markdown_html(md, "/b")
+        assert "math-inline" not in h, md
+        assert "$5" in h
+
+
+def test_backslash_math_still_works_no_regression():
+    """Unlimited의 \\(..\\)/\\[..\\] 경로는 그대로 렌더돼야 한다(무회귀)."""
+    h = render_markdown_html(r"질량 \( E = mc^{2} \) 과 \[ x^2 + y^2 \] 이다", "/b")
+    assert 'class="math-inline"' in h and 'class="math-display"' in h
+
+
+def test_dollar_inside_code_preserved():
+    """인라인 코드/코드펜스 안의 $는 수식으로 해석하지 않는다."""
+    h = render_markdown_html("변수 `$5` 는 코드", "/b")
+    assert "$5" in h and "math-inline" not in h
+
+
 def test_html_table_with_attributes_restored():
     """OvisOCR2가 <table border="1">처럼 속성을 붙여도 표가 렌더돼야 한다.
     여는 태그가 통째로 이스케이프돼 표가 깨지던 회귀(2026-07-21) 방지."""
