@@ -353,6 +353,7 @@ const ICON = {
   sun: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/></svg>',
   x: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
   chip: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>',
+  docLayout: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 9v12"/></svg>',
 };
 
 /* ============================ State ============================ */
@@ -460,7 +461,6 @@ const EL_IDS = {
   jobTime: 'job-time',
   jobModel: 'job-model',
   streamModeChip: 'stream-mode-chip',
-  doclayoutNote: 'doclayout-note',
   jobStop: 'job-stop',
   jobStopLabel: 'job-stop-label',
   jobDelete: 'job-delete',
@@ -673,14 +673,11 @@ export function jobModelChip(job) {
   return { text, title };
 }
 
-// 레이아웃 탭 한계 안내 (순수). **그 잡을 실제로 변환한 엔진**이 현재 엔진이고
-// 그 엔진이 figure_only일 때만 문구를 낸다. 엔진 메타가 없는 잡(이 기능 이전에
-// 변환된 구 잡 = 항상 full layout 엔진)이나 다른 엔진의 잡에는 붙이지 않는다 —
-// 거짓 안내보다 무표시가 안전하다.
-export function docLayoutNoteFor(layoutCapability, jobEngine, healthEngine) {
-  if (layoutCapability !== 'figure_only') return null;
-  if (!jobEngine || jobEngine !== healthEngine) return null;
-  return '현재 엔진은 figure 위치만 제공합니다 — 레이아웃 뷰에는 그림 블록만 표시되고 텍스트 배치는 재구성되지 않습니다.';
+// figure_only 엔진(본문 텍스트에 bbox 없음 → 레이아웃 재구성이 빈 흰 페이지)인지 판정 (순수).
+// **그 잡을 실제로 변환한 엔진**이 현재 엔진일 때만 확신한다 — 엔진 메타가 없는 구 잡
+// (이 기능 이전 변환 = 항상 full layout)이나 다른 엔진의 잡은 제외한다(거짓 판단보다 무표시).
+export function docLayoutIsFigureOnly(layoutCapability, jobEngine, healthEngine) {
+  return layoutCapability === 'figure_only' && !!jobEngine && jobEngine === healthEngine;
 }
 
 async function loadHealth() {
@@ -715,7 +712,6 @@ function renderHealth(d) {
   state.streamGranularity = hc.streamGranularity;
   state.layoutCapability = hc.layoutCapability;
   applyStreamModeChip();
-  applyDocLayoutNote();
 
   const c = el.healthBadges;
   c.textContent = '';
@@ -796,22 +792,6 @@ function applyStreamModeChip() {
 function applyModelLoadingNotice() {
   if (!el.uploadModelNotice) return;
   el.uploadModelNotice.hidden = state.modelLoaded !== false;
-}
-
-// layout capability가 figure_only인 엔진의 잡에는 레이아웃 탭에 한계 안내를 붙인다.
-// 열린 잡의 엔진과 현재 활성 엔진이 다르면(엔진 전환 후 옛 잡 열람) 단정할 수
-// 없으므로 표시하지 않는다 — 거짓 안내보다 무표시가 안전.
-function applyDocLayoutNote() {
-  if (!el.doclayoutNote) return;
-  const relevant = docLayoutNoteFor(
-    state.layoutCapability, state.currentJobEngine, state.healthEngine,
-  );
-  if (relevant !== null) {
-    el.doclayoutNote.textContent = relevant;
-    el.doclayoutNote.hidden = false;
-  } else {
-    el.doclayoutNote.hidden = true;
-  }
 }
 
 /* ============================ Job history ============================ */
@@ -1102,7 +1082,6 @@ function renderJob(job) {
       el.jobModel.hidden = true;
     }
   }
-  applyDocLayoutNote();
 
   const running = job.status === 'queued' || job.status === 'running';
   const done = job.status === 'done';
@@ -1937,16 +1916,24 @@ function renderResult(job) {
   resetTranslateUI();
 
   state.currentBaseName = base;
+  // figure_only 엔진의 standalone layout.html도 본문 없는 빈 캔버스라 오해를 준다 —
+  // 다운로드 자체를 비활성화하고(전체 내용은 MD/ZIP), 이유를 title로 밝힌다.
+  const figOnlyLayout = docLayoutIsFigureOnly(
+    state.layoutCapability, state.currentJobEngine, state.healthEngine,
+  );
+  const noLayoutData = r.has_layout === false;
   state.resultUrls = {
     markdown: r.markdown_url,
     archive: r.archive_url,
     // 레이아웃 기능 이전에 변환된 옛 잡(layout.json 없음)은 /layout.html이 404 —
     // 눌러도 조용히 실패하는 버튼 대신 비활성화한다 (has_layout 미제공 구버전 응답은 허용)
-    layoutHtml: r.has_layout === false ? null : `/api/jobs/${job.job_id}/layout.html`,
+    layoutHtml: (noLayoutData || figOnlyLayout) ? null : `/api/jobs/${job.job_id}/layout.html`,
   };
   applyDownloadLangs(); // currentLang='orig' → 원문 URL로 세팅
-  if (r.has_layout === false) {
+  if (noLayoutData) {
     el.dlLayout.title = '이 작업은 구버전 변환이라 레이아웃 데이터가 없습니다 — PDF를 다시 변환하면 생깁니다';
+  } else if (figOnlyLayout) {
+    el.dlLayout.title = '이 엔진은 텍스트 배치 좌표가 없어 레이아웃 파일이 비어 있습니다 — Markdown·ZIP 다운로드에 전체 내용이 있습니다';
   } else {
     el.dlLayout.removeAttribute('title');
   }
@@ -2332,10 +2319,39 @@ function activateTab(name) {
   else if (name === 'doclayout') loadDocLayout();
 }
 
+// figure_only 엔진(OvisOCR2·PaddleOCR-VL 등)은 본문 텍스트에 좌표가 없어 서버 레이아웃
+// 재구성이 "빈 흰 페이지 + 그림 사각형 몇 개"로 나온다 — 사용자에겐 변환이 깨진 것처럼
+// 보인다. 오해를 주는 캔버스 대신, 전체 내용은 미리보기/Markdown에 있고 그림 위치는
+// 감지 박스 탭에 있음을 분명히 안내하는 카드를 그린다.
+function renderFigureOnlyDocLayout() {
+  el.doclayoutBody.textContent = '';
+  const goPreview = h('button', { class: 'btn btn-primary btn-small', type: 'button' }, '미리보기로 이동');
+  goPreview.addEventListener('click', () => activateTab('preview'));
+  el.doclayoutBody.appendChild(h('div', { class: 'doclayout-figonly' },
+    h('div', { class: 'df-icon', html: ICON.docLayout }),
+    h('h3', { class: 'df-title', text: '이 엔진은 텍스트 배치 좌표를 제공하지 않습니다' }),
+    h('p', { class: 'df-lead', text: '현재 OCR 엔진은 문서를 흐름 텍스트로 재구성합니다. '
+      + '페이지 위 정확한 좌표로 텍스트를 재배치하는 레이아웃 뷰는 Unlimited 엔진에서만 제공됩니다 — '
+      + '변환된 내용이 사라진 것이 아닙니다.' }),
+    h('ul', { class: 'df-list' },
+      h('li', null, h('strong', { text: '전체 내용' }), ' — “미리보기” · “Markdown” 탭에 텍스트·표·수식이 모두 있습니다.'),
+      h('li', null, h('strong', { text: '그림·표 위치' }), ' — “감지 박스” 탭에서 원본 페이지 위에 표시됩니다.'),
+    ),
+    goPreview,
+  ));
+}
+
 async function loadDocLayout() {
   if (state.docLayoutLoaded) return;
   const id = state.currentJobId;
   if (!id) return;
+  // figure_only 엔진은 캔버스가 비어 "흰 바탕에 그림만" 나온다 — 캔버스를 아예 그리지 않고
+  // 안내 카드로 대체(전체 내용은 미리보기/Markdown, 그림 위치는 감지 박스로 유도).
+  if (docLayoutIsFigureOnly(state.layoutCapability, state.currentJobEngine, state.healthEngine)) {
+    state.docLayoutLoaded = true;
+    renderFigureOnlyDocLayout();
+    return;
+  }
   const lang = state.currentLang; // 응답 도착 시점에 언어가 바뀌었는지 판별용
   el.doclayoutBody.textContent = '';
   el.doclayoutBody.appendChild(h('p', { class: 'muted', text: '레이아웃을 불러오는 중…' }));

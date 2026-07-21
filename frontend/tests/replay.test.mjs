@@ -40,7 +40,7 @@ import {
   healthCapabilities,
   providerIssue,
   jobModelChip,
-  docLayoutNoteFor,
+  docLayoutIsFigureOnly,
   progressPhaseText,
 } from '../app.js';
 
@@ -774,11 +774,11 @@ test('jobModelChip: 잡 모델 메타 → 칩 텍스트/툴팁, 구버전 잡은
   assert.equal(jobModelChip({ engine: 'ovisocr2' }).text, 'ovisocr2');
 });
 
-test('docLayoutNoteFor: figure_only 엔진 잡에만 안내, 엔진 불일치·full은 null', () => {
-  assert.ok(docLayoutNoteFor('figure_only', 'ovisocr2', 'ovisocr2'), '현재 엔진 잡 → 안내');
-  assert.equal(docLayoutNoteFor('figure_only', 'unlimited', 'ovisocr2'), null, '다른 엔진의 잡 → 무표시');
-  assert.equal(docLayoutNoteFor('full', 'paddleocr_vl', 'paddleocr_vl'), null, 'full layout은 안내 불필요');
-  assert.equal(docLayoutNoteFor(undefined, undefined, undefined), null, 'legacy health');
+test('docLayoutIsFigureOnly: figure_only 엔진 잡만 true, 엔진 불일치·full은 false', () => {
+  assert.equal(docLayoutIsFigureOnly('figure_only', 'ovisocr2', 'ovisocr2'), true, '현재 엔진 잡 → 카드');
+  assert.equal(docLayoutIsFigureOnly('figure_only', 'unlimited', 'ovisocr2'), false, '다른 엔진의 잡 → 캔버스');
+  assert.equal(docLayoutIsFigureOnly('full', 'paddleocr_vl', 'paddleocr_vl'), false, 'full layout은 캔버스');
+  assert.equal(docLayoutIsFigureOnly(undefined, undefined, undefined), false, 'legacy health');
 });
 
 test('progressPhaseText: note(모델 로딩) 최우선, 없으면 queued/phase 규칙', () => {
@@ -797,9 +797,9 @@ test('progressPhaseText: note(모델 로딩) 최우선, 없으면 queued/phase �
   assert.equal(progressPhaseText({ note: '', phase: 'ocr' }, 'running', 'x'), 'OCR');
 });
 
-test('docLayoutNoteFor: 구버전 잡(엔진 메타 없음)에는 안내하지 않는다', () => {
+test('docLayoutIsFigureOnly: 구버전 잡(엔진 메타 없음)은 캔버스 유지', () => {
   // 엔진 메타가 없는 잡 = 이 기능 이전 변환 = Unlimited(full layout)로 만든 결과.
-  // 현재 엔진이 figure_only여도 그 잡의 레이아웃은 완전하므로 오안내 금지.
-  assert.equal(docLayoutNoteFor('figure_only', undefined, 'ovisocr2'), null);
-  assert.equal(docLayoutNoteFor('figure_only', null, 'ovisocr2'), null);
+  // 현재 엔진이 figure_only여도 그 잡의 레이아웃은 완전하므로 카드로 가리지 않는다.
+  assert.equal(docLayoutIsFigureOnly('figure_only', undefined, 'ovisocr2'), false);
+  assert.equal(docLayoutIsFigureOnly('figure_only', null, 'ovisocr2'), false);
 });
