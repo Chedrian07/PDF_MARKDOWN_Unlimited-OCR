@@ -22,6 +22,12 @@
 #          (`--profile … down/up`만 쓰면 위 경고대로 ocr-cpu까지 지웠다 다시 만든다)
 #   GPU는 sidecar(ovisocr2·paddleocr-vl)만 사용하고, ocr-ovis/ocr-paddle 백엔드는
 #   GPU 예약 없이 sidecar와 HTTP로만 통신한다 (docs/CUDA_5070TI_MULTI_OCR_PLAN.md).
+#
+# ✅ 세 엔진 모두 OCR 모델을 CUDA에서 실행한다 — `gpus: all`을 받는 컨테이너는
+#    모델을 돌리는 셋뿐이다: ocr-cuda(Unlimited)·ovisocr2(Ovis)·paddleocr-vl(Paddle).
+#    ocr-ovis/ocr-paddle의 `TORCH_VARIANT: cpu`는 **웹/PDF렌더 오케스트레이터**용이며
+#    OCR 추론과 무관하다(GPU는 sidecar 독점). 각 sidecar는 CUDA가 없으면 CPU로
+#    조용히 강등하지 않고 명확한 오류로 **하드 실패**한다(app/model.py::_require_cuda).
 
 services:
   ocr-cpu:

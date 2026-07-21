@@ -40,9 +40,26 @@ class OvisModel:
     def loaded(self) -> bool:
         return self._llm is not None
 
+    @staticmethod
+    def _require_cuda() -> None:
+        """CUDA를 못 쓰면 명확한 메시지로 실패한다 (CPU 무음 강등 없음 — 5070 Ti 전용)."""
+        try:
+            import torch
+        except ImportError:
+            return  # torch 미설치 환경(테스트 등) — vLLM 로드 시점에 걸린다
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA를 사용할 수 없습니다 — OvisOCR2 sidecar는 GPU 전용입니다. "
+                "compose의 `gpus: all`과 nvidia-container-toolkit, 호스트 드라이버, "
+                "cu129 베이스 이미지를 확인하세요."
+            )
+
     def load(self) -> None:
         """vLLM 엔진 로드 — 실패 시 load_error에 기록하고 예외 전파."""
         try:
+            # vLLM은 CUDA 없이는 로드가 하드 실패하지만(무음 CPU 강등 없음),
+            # RTX 5070 Ti 전용 배포임을 명시하고 진단을 앞당기기 위해 먼저 확인한다.
+            self._require_cuda()
             from vllm import LLM, SamplingParams
 
             cfg = self.cfg

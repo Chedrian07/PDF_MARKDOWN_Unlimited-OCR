@@ -65,9 +65,34 @@ class PaddleModel:
             logger.exception("PaddleOCR-VL 로딩 실패")
             raise
 
+    def _require_cuda(self) -> None:
+        """GPU를 요청했는데 CUDA를 못 쓰면 **명시적으로 실패**한다.
+
+        RTX 5070 Ti 전용 배포이므로 CPU로 조용히 떨어지는 것을 허용하지 않는다 —
+        정확도는 같아도 페이지당 수십 초로 느려져 사용자가 원인을 모른 채 방치된다.
+        PADDLEOCR_DEVICE=cpu로 **명시적으로** 요청한 경우에만 CPU를 허용한다."""
+        if not self.cfg.device.startswith("gpu"):
+            logger.warning("PADDLEOCR_DEVICE=%s — CPU 모드로 요청됨 (느림, 비상용)", self.cfg.device)
+            return
+        import paddle
+
+        if not paddle.device.is_compiled_with_cuda():
+            raise RuntimeError(
+                "PADDLEOCR_DEVICE=gpu이지만 이 paddle 빌드는 CUDA를 지원하지 않습니다 "
+                "(CPU 빌드로 설치됨). services/paddleocr_vl/Dockerfile의 "
+                "paddlepaddle-gpu(cu129) 설치를 확인하세요."
+            )
+        if paddle.device.cuda.device_count() < 1:
+            raise RuntimeError(
+                "PADDLEOCR_DEVICE=gpu이지만 CUDA 디바이스가 보이지 않습니다 — "
+                "compose의 `gpus: all`과 nvidia-container-toolkit, 호스트 드라이버를 확인하세요. "
+                "CPU로 조용히 강등하지 않고 실패합니다(RTX 5070 Ti 전용 배포)."
+            )
+
     def _load_in_owner(self) -> None:
         from paddleocr import PaddleOCRVL
 
+        self._require_cuda()  # CPU 무음 강등 차단 — 요청한 GPU가 실제로 있어야 로드
         logger.info(
             "PaddleOCR-VL 파이프라인 로딩 (version=%s, device=%s)",
             PIPELINE_VERSION, self.cfg.device,
