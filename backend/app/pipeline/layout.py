@@ -309,6 +309,16 @@ def _layout_fit_script(frontend_dir: Path | None) -> str:
     )
 
 
+def _image_data_uri(job_dir: Path, name: str) -> str:
+    """images/{name}을 data URI로 — standalone 파일(layout/document) 공용."""
+    p = job_dir / "images" / name
+    try:
+        b64 = base64.b64encode(p.read_bytes()).decode()
+        return f"data:image/jpeg;base64,{b64}"
+    except OSError:
+        return "data:,"  # 결측 크롭 — 빈 이미지로 폴백
+
+
 def render_layout_standalone(
     pages: list[dict], job_dir: Path, title: str, frontend_dir: Path | None,
     lang: str | None = None,
@@ -317,17 +327,10 @@ def render_layout_standalone(
     lang을 주면 <html>·<main>에 lang 속성을 부여해 번역본에 `[lang="ko"] .layout-block`
     (한글 서리프·word-break) 규칙이 적용된다. 원본(lang=None)에는 lang을 붙이지 않아
     비한국어 문서에 한글 타이포가 잘못 적용되는 것을 막는다."""
-
-    def _inline_image(name: str) -> str:
-        p = job_dir / "images" / name
-        try:
-            b64 = base64.b64encode(p.read_bytes()).decode()
-            return f"data:image/jpeg;base64,{b64}"
-        except OSError:
-            return "data:,"  # 결측 크롭 — 빈 이미지로 폴백
-
     # body에는 lang을 전달하지 않는다 — 컨테이너(<main>)에서 한 번만 부여.
-    body = render_layout_html(pages, files_base_url="", image_src=_inline_image)
+    body = render_layout_html(
+        pages, files_base_url="", image_src=lambda name: _image_data_uri(job_dir, name),
+    )
     katex = _katex_inline_bundle(str(frontend_dir)) if frontend_dir else ""
     fitter = _layout_fit_script(frontend_dir)  # katex 뒤에 배치 → 타이포셋 후 실행
     lang_attr = f' lang="{lang}"' if lang else ""
@@ -337,4 +340,63 @@ def render_layout_standalone(
         f"<title>{escapeHtml(title)}</title>\n"
         f"<style>{_STANDALONE_CSS}</style>\n{katex}\n{fitter}\n</head>\n"
         f'<body><main class="doclayout-body"{lang_attr}>\n{body}\n</main></body>\n</html>\n'
+    )
+
+
+# ── standalone 문서 HTML (다운로드용 단일 파일 — 미리보기 뷰) ─────────────
+# 레이아웃 좌표가 없는 figure_only 엔진(OvisOCR2·PaddleOCR-VL)의 layout.html은
+# 빈 캔버스라 내보내기 구실을 못 한다 — 모든 엔진에서 동작하는 문서 뷰(/html과
+# 동일 렌더) 내보내기가 이것. ⚠ SYNC: frontend/styles.css의 .markdown-body 규칙과
+# 시각적으로 동기 유지할 것 (표 테두리·수식 중앙정렬·doc-page 구분선).
+_DOCUMENT_CSS = """
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0 auto; padding: 40px 24px 60px; max-width: 860px; background: #fff;
+  color: #1a1c22; font: 15px/1.7 system-ui, -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  overflow-wrap: break-word; }
+h1, h2, h3, h4, h5, h6 { font-weight: 650; line-height: 1.3; margin: 1.4em 0 0.6em; }
+h1 { font-size: 1.7em; padding-bottom: 0.3em; border-bottom: 1px solid #e3e5ea; }
+h2 { font-size: 1.4em; padding-bottom: 0.25em; border-bottom: 1px solid #e3e5ea; }
+h3 { font-size: 1.2em; }
+p, ul, ol, blockquote, table, pre { margin: 0.8em 0; }
+ul, ol { padding-left: 1.6em; }
+a { color: #4650e5; }
+img { max-width: 100%; height: auto; border: 1px solid #e3e5ea; border-radius: 4px; }
+blockquote { padding: 0.4em 1em; border-left: 3px solid #d5d7dd; color: #626875; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em;
+  background: #f0f1f4; padding: 0.15em 0.4em; border-radius: 4px; }
+pre { background: #f0f1f4; padding: 12px 14px; border-radius: 6px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; }
+th, td { border: 1px solid #d5d7dd; padding: 7px 11px; text-align: left; }
+th { background: #f0f1f4; font-weight: 600; }
+tr:nth-child(even) td { background: #f7f8fa; }
+.math-display { display: block; text-align: center; margin: 1em 0; overflow-x: auto; }
+.doc-page + .doc-page { border-top: 2px dashed #d5d7dd; margin-top: 28px; padding-top: 24px; }
+main[lang="ko"] { word-break: keep-all; }
+@media print { body { padding: 0; } }
+"""
+
+# 렌더가 files_base_url로 재작성한 이미지 참조. 파일명 캡처는 [^"/]+ — 슬래시 배제로
+# `..%2F`류 트래버설 문자열은 매치 자체가 안 되고, 이름은 images/ 하위에서만 조회된다.
+_DOC_IMG_SRC = re.compile(r'src="[^"]*/images/([^"/]+)"')
+
+
+def render_document_standalone(
+    inner_html: str, job_dir: Path, title: str, frontend_dir: Path | None,
+    lang: str | None = None,
+) -> str:
+    """문서 뷰(/html과 동일 렌더 결과)를 완전 자립형 HTML로 — 이미지 base64·KaTeX
+    인라인. inner_html은 신뢰 경로(render_document_html 출력)만 받는다."""
+    body = _DOC_IMG_SRC.sub(
+        lambda m: f'src="{_image_data_uri(job_dir, m.group(1))}"', inner_html,
+    )
+    katex = _katex_inline_bundle(str(frontend_dir)) if frontend_dir else ""
+    lang_attr = f' lang="{lang}"' if lang else ""
+    return (
+        f'<!doctype html>\n<html{lang_attr}>\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{escapeHtml(title)}</title>\n"
+        f"<style>{_DOCUMENT_CSS}</style>\n{katex}\n</head>\n"
+        f'<body><main{lang_attr}>\n{body}\n</main></body>\n</html>\n'
     )

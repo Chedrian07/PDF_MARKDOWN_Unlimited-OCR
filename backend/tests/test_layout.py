@@ -216,6 +216,51 @@ def test_layout_standalone_self_contained(tmp_path):
     assert 'src="http' not in html and 'href="http' not in html
 
 
+def test_document_standalone_self_contained(tmp_path):
+    """문서 뷰 standalone(document.html) — figure_only 엔진에서도 동작하는 내보내기.
+    이미지 base64 인라인·결측 폴백·서버 참조 제거·제목 이스케이프·lang 부여."""
+    from app.pipeline.layout import render_document_standalone
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "p0001_0.jpg").write_bytes(b"\xff\xd8fakejpg")
+    inner = (
+        '<section class="doc-page" data-page="1">\n'
+        "<h1>제목</h1>\n<p>본문 문단</p>\n"
+        '<p><img src="/api/jobs/j_x/files/images/p0001_0.jpg" alt="" '
+        'style="width:31.7%;height:auto;"></p>\n'
+        '<p><img src="/api/jobs/j_x/files/images/missing.jpg" alt=""></p>\n'
+        '<p><span class="math-inline">\\tau^{2}</span></p>\n</section>'
+    )
+    html = render_document_standalone(inner, tmp_path, "테스트 <문서>", FRONTEND_DIR)
+    assert html.startswith("<!doctype html>")
+    assert "<title>테스트 &lt;문서&gt;</title>" in html   # 제목 이스케이프
+    assert "data:image/jpeg;base64," in html               # 이미지 인라인
+    assert 'src="data:,"' in html                          # 결측 이미지 폴백
+    assert "/api/jobs/" not in html                        # 서버 참조 없는 완전 자립
+    assert 'style="width:31.7%;height:auto;"' in html      # figure 상대폭 스타일 보존
+    assert '<span class="math-inline">\\tau^{2}</span>' in html
+    if (FRONTEND_DIR / "vendor" / "katex" / "katex.min.js").is_file():
+        assert "katex" in html and "data:font/woff2;base64," in html
+    assert 'src="http' not in html and 'href="http' not in html
+    # lang: 원본엔 없음 / ko엔 html·main 모두 부여 (keep-all 타이포 스코프)
+    assert "<html>" in html and "<main>" in html
+    ko = render_document_standalone(inner, tmp_path, "문서", FRONTEND_DIR, lang="ko")
+    assert '<html lang="ko">' in ko and '<main lang="ko">' in ko
+
+
+def test_document_standalone_no_traversal(tmp_path):
+    """이미지 파일명 캡처는 슬래시 배제 — `../` 류는 매치 자체가 안 돼 원문 유지
+    (존재하지 않는 서버 경로로 남을 뿐, 파일 시스템 접근 없음)."""
+    from app.pipeline.layout import render_document_standalone
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "secret.txt").write_text("secret")
+    inner = '<img src="/api/jobs/j_x/files/images/../secret.txt" alt="">'
+    html = render_document_standalone(inner, tmp_path, "t", None)
+    assert "secret" not in html.replace("secret.txt", "")  # 파일 내용 미포함
+    assert "data:image/jpeg;base64," not in html
+
+
 def test_vertical_blocks_render_writing_mode_class():
     pages = [{"page": 1, "width": 612, "height": 792, "blocks": [
         {"type": "text", "bbox": [10, 300, 40, 900], "content": "arXiv:1908.07836v1 [cs.CL]",

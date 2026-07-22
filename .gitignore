@@ -20,6 +20,10 @@ native/build/
 sample/e2e-*/
 nohup.out
 
+# Node (e2e 브라우저 테스트 의존성)
+node_modules/
+frontend/tests/e2e/shots/
+
 # Editors / OS
 .idea/
 .vscode/

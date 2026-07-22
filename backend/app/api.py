@@ -25,7 +25,11 @@ from fastapi.responses import (
 
 from . import native_ops
 from .pipeline.pdf import probe_pdf
-from .pipeline.layout import render_layout_html, render_layout_standalone
+from .pipeline.layout import (
+    render_document_standalone,
+    render_layout_html,
+    render_layout_standalone,
+)
 from .pipeline.render import render_document_html, render_markdown_html
 # 번역 코어는 아직 스켈레톤(run_translation은 NotImplementedError)이지만 import는 가능.
 # 테스트는 app.api.run_translation을 몽키패치로 대체한다.
@@ -485,6 +489,38 @@ def job_layout_download(request: Request, job_id: str, lang: str | None = None) 
     return HTMLResponse(html, headers={
         "Content-Disposition":
             f"attachment; filename=\"document{suffix}.layout.html\"; filename*=UTF-8''{quote(fname)}",
+    })
+
+
+@router.get("/jobs/{job_id}/document.html")
+def job_document_download(request: Request, job_id: str, lang: str | None = None) -> HTMLResponse:
+    """문서 뷰(/html과 동일 렌더) standalone HTML 다운로드 — 이미지 base64·KaTeX
+    인라인 단일 파일. 레이아웃 좌표가 없는 figure_only 엔진(OvisOCR2·PaddleOCR-VL)
+    에서도 동작하는 HTML 내보내기다 (layout.html은 그 엔진에선 빈 캔버스).
+    lang=ko면 번역 마크다운으로 렌더하고 파일명에 .ko.를 붙인다."""
+    from urllib.parse import quote
+
+    job = _get_job(request, job_id)
+    st = _state(request)
+    if lang is not None:
+        _check_lang(lang)
+        text = _translated_markdown_or_404(job, lang)
+    else:
+        text, _partial = _read_markdown(job)  # 미완료 잡도 부분 결과 내보내기 허용(/markdown과 동일)
+    inner = render_document_html(
+        text, f"/api/jobs/{job_id}/files",
+        figure_boxes=_load_figure_boxes(job),
+        page_separator=st.settings.page_separator,
+    )
+    stem = Path(job.filename).stem or "document"
+    html = render_document_standalone(
+        inner, job.dir, stem, st.settings.resolve_frontend_dir(), lang=lang,
+    )
+    suffix = f".{lang}" if lang else ""
+    fname = f"{stem}{suffix}.html"
+    return HTMLResponse(html, headers={
+        "Content-Disposition":
+            f"attachment; filename=\"document{suffix}.html\"; filename*=UTF-8''{quote(fname)}",
     })
 
 

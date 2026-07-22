@@ -488,6 +488,7 @@ const EL_IDS = {
   resultSection: 'result-section',
   dlMd: 'dl-md',
   dlZip: 'dl-zip',
+  dlDoc: 'dl-doc',
   dlLayout: 'dl-layout',
   translateBtn: 'translate-btn',
   translateProgress: 'translate-progress',
@@ -1846,9 +1847,11 @@ async function onJobDone(id, data) {
     state.resultUrls = {
       markdown: data.markdown_url,
       archive: data.archive_url,
+      documentHtml: `/api/jobs/${id}/document.html`,
       layoutHtml: `/api/jobs/${id}/layout.html`,
     };
     applyDownloadLangs();
+    el.dlLayout.hidden = false; // 엔진 메타 없는 최소 경로 — 이전 잡의 숨김 상태 잔류 방지
     renderThumbGrid(el.layoutsGrid, [], '레이아웃 이미지를 불러오지 못했습니다.');
     renderThumbGrid(el.pagesGrid, [], '페이지 이미지를 불러오지 못했습니다.');
     state.previewLoaded = false;
@@ -1916,8 +1919,9 @@ function renderResult(job) {
   resetTranslateUI();
 
   state.currentBaseName = base;
-  // figure_only 엔진의 standalone layout.html도 본문 없는 빈 캔버스라 오해를 준다 —
-  // 다운로드 자체를 비활성화하고(전체 내용은 MD/ZIP), 이유를 title로 밝힌다.
+  // figure_only 엔진의 standalone layout.html은 본문 없는 빈 캔버스라 내보내기 구실을
+  // 못 한다 — HTML 내보내기는 모든 엔진에서 동작하는 document.html(HTML 다운로드)이
+  // 담당하고, 레이아웃 버튼은 이 엔진에선 숨긴다(기능이 완전히 대체됨).
   const figOnlyLayout = docLayoutIsFigureOnly(
     state.layoutCapability, state.currentJobEngine, state.healthEngine,
   );
@@ -1925,15 +1929,15 @@ function renderResult(job) {
   state.resultUrls = {
     markdown: r.markdown_url,
     archive: r.archive_url,
+    documentHtml: `/api/jobs/${job.job_id}/document.html`,
     // 레이아웃 기능 이전에 변환된 옛 잡(layout.json 없음)은 /layout.html이 404 —
     // 눌러도 조용히 실패하는 버튼 대신 비활성화한다 (has_layout 미제공 구버전 응답은 허용)
     layoutHtml: (noLayoutData || figOnlyLayout) ? null : `/api/jobs/${job.job_id}/layout.html`,
   };
   applyDownloadLangs(); // currentLang='orig' → 원문 URL로 세팅
+  el.dlLayout.hidden = figOnlyLayout;
   if (noLayoutData) {
     el.dlLayout.title = '이 작업은 구버전 변환이라 레이아웃 데이터가 없습니다 — PDF를 다시 변환하면 생깁니다';
-  } else if (figOnlyLayout) {
-    el.dlLayout.title = '이 엔진은 텍스트 배치 좌표가 없어 레이아웃 파일이 비어 있습니다 — Markdown·ZIP 다운로드에 전체 내용이 있습니다';
   } else {
     el.dlLayout.removeAttribute('title');
   }
@@ -1962,6 +1966,11 @@ function renderPartialResult(job) {
   resetTranslateUI(); // 취소본은 번역 대상이 아니다 (컨트롤 숨김)
   setDownload(el.dlMd, `/api/jobs/${id}/markdown`, `${base}.partial.md`);
   setDownload(el.dlZip, null); // archive returns 409 for unfinished jobs
+  setDownload(el.dlDoc, `/api/jobs/${id}/document.html`, `${base}.partial.html`); // 부분 문서도 유효
+  const figOnly = docLayoutIsFigureOnly(
+    state.layoutCapability, state.currentJobEngine, state.healthEngine,
+  );
+  el.dlLayout.hidden = figOnly; // figure_only의 layout.html은 빈 캔버스 — 문서 HTML이 대체
   setDownload(el.dlLayout, `/api/jobs/${id}/layout.html`, `${base}.layout.html`); // 부분 레이아웃도 유효
 
   renderThumbGrid(el.layoutsGrid, [], '취소된 작업에는 레이아웃 이미지가 제공되지 않습니다.');
@@ -2100,14 +2109,15 @@ function setResultLangAttr() {
   }
 }
 
-// 현재 언어에 맞춰 다운로드 링크(markdown·layout.html)를 다시 세팅. 아카이브는
-// ko 파일이 자동 포함되므로 원본 URL 그대로 둔다.
+// 현재 언어에 맞춰 다운로드 링크(markdown·document.html·layout.html)를 다시 세팅.
+// 아카이브는 ko 파일이 자동 포함되므로 원본 URL 그대로 둔다.
 function applyDownloadLangs() {
   const u = state.resultUrls || {};
   const base = state.currentBaseName || 'document';
   const suffix = state.currentLang === 'ko' ? '.ko' : '';
   setDownload(el.dlMd, u.markdown ? withLangUrl(u.markdown, state.currentLang) : null, `${base}${suffix}.md`);
   setDownload(el.dlZip, u.archive || null, `${base}.md.zip`);
+  setDownload(el.dlDoc, u.documentHtml ? withLangUrl(u.documentHtml, state.currentLang) : null, `${base}${suffix}.html`);
   setDownload(el.dlLayout, u.layoutHtml ? withLangUrl(u.layoutHtml, state.currentLang) : null, `${base}${suffix}.layout.html`);
 }
 

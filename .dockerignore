@@ -5,6 +5,7 @@ data/
 hf-cache/
 **/__pycache__/
 **/.venv/
+**/node_modules/
 **/.pytest_cache/
 **/dist/
 **/build/

@@ -119,6 +119,18 @@ def test_full_flow_multi(client, sample_pdf):
     #  no-frontend로 비활성화하므로 여기서 단언 안 함. E2E/test_layout에서 검증.)
     assert f"/api/jobs/{jid}" not in dl.text  # 서버 참조 없는 완전 자립 파일
 
+    # standalone 문서 HTML 다운로드 (figure_only 엔진 대응 내보내기): 문서 뷰
+    # 렌더(/html)와 동일 본문 + 이미지 base64 인라인 + 서버 참조 없음
+    doc = client.get(f"/api/jobs/{jid}/document.html")
+    assert doc.status_code == 200
+    assert "attachment" in doc.headers["content-disposition"]
+    assert 'filename="document.html"' in doc.headers["content-disposition"]
+    assert doc.text.startswith("<!doctype html>")
+    assert "data:image/jpeg;base64," in doc.text
+    assert "<table>" in doc.text                       # 표 복원 유지
+    assert doc.text.count('<section class="doc-page"') == 3  # 페이지 경계 유지
+    assert f"/api/jobs/{jid}" not in doc.text          # 완전 자립 파일
+
     img = client.get(res["images"][0])
     assert img.status_code == 200
     assert img.headers["content-type"].startswith("image/")
